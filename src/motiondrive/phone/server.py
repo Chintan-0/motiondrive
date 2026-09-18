@@ -130,16 +130,24 @@ def ensure_firewall_rules() -> bool:
         return True
     try:
         import subprocess
-        cmd = (
-            'netsh advfirewall firewall add rule name="MotionDrive Controller Ports" '
-            'dir=in action=allow protocol=TCP localport=8765,8766 profile=any'
+        exe_path = sys.executable if getattr(sys, "frozen", False) else ""
+        prog_arg = f'program="{exe_path}" ' if exe_path else ""
+
+        cmd_http = (
+            'netsh advfirewall firewall add rule name="MotionDrive Phone Controller HTTP" '
+            f'dir=in action=allow protocol=TCP localport=8765 {prog_arg}profile=private,public'
         )
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if res.returncode == 0:
-            log.info("Windows Firewall rule 'MotionDrive Controller Ports' verified/added (TCP 8765, 8766)")
+        cmd_ws = (
+            'netsh advfirewall firewall add rule name="MotionDrive Phone Controller WebSocket" '
+            f'dir=in action=allow protocol=TCP localport=8766 {prog_arg}profile=private,public'
+        )
+        res1 = subprocess.run(cmd_http, shell=True, capture_output=True, text=True)
+        res2 = subprocess.run(cmd_ws, shell=True, capture_output=True, text=True)
+        if res1.returncode == 0 and res2.returncode == 0:
+            log.info("Windows Firewall rules 'MotionDrive Phone Controller HTTP/WebSocket' verified/added (TCP 8765, 8766)")
             return True
         else:
-            log.debug("Could not add firewall rule (non-fatal, requires elevation): %s", res.stderr.strip())
+            log.debug("Could not add firewall rules (non-fatal, requires elevation): %s %s", res1.stderr.strip(), res2.stderr.strip())
             return False
     except Exception as e:
         log.debug("Firewall check skipped: %s", e)

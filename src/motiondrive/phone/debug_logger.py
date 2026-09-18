@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.request
@@ -15,6 +16,55 @@ from motiondrive.paths import LOGS_DIR
 
 _LOG_DIR = LOGS_DIR
 _LOG_FILE = _LOG_DIR / "phone_connection_debug.log"
+
+
+def get_firewall_status() -> Dict[str, str]:
+    """Inspects Windows Firewall rules and Network Profile for MotionDrive ports."""
+    res = {
+        "network_profile": "Unknown",
+        "rule_present": "MISSING",
+        "http_8765": "UNKNOWN",
+        "ws_8766": "UNKNOWN",
+    }
+    if sys.platform != "win32":
+        res["network_profile"] = "N/A (Non-Windows)"
+        res["rule_present"] = "N/A"
+        res["http_8765"] = "ALLOW"
+        res["ws_8766"] = "ALLOW"
+        return res
+
+    try:
+        import subprocess
+        ps_cmd = "(Get-NetConnectionProfile | Select-Object -ExpandProperty NetworkCategory)"
+        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=2)
+        if proc.returncode == 0 and proc.stdout.strip():
+            first_profile = proc.stdout.strip().splitlines()[0].strip()
+            res["network_profile"] = first_profile
+
+        proc_http = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Phone Controller HTTP"], capture_output=True, text=True, timeout=2)
+        proc_ws = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Phone Controller WebSocket"], capture_output=True, text=True, timeout=2)
+        proc_legacy = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Controller Ports"], capture_output=True, text=True, timeout=2)
+
+        has_http = (proc_http.returncode == 0 and "Enabled:" in proc_http.stdout and "Yes" in proc_http.stdout)
+        has_ws = (proc_ws.returncode == 0 and "Enabled:" in proc_ws.stdout and "Yes" in proc_ws.stdout)
+        has_legacy = (proc_legacy.returncode == 0 and "Enabled:" in proc_legacy.stdout and "Yes" in proc_legacy.stdout)
+
+        if has_http or has_ws or has_legacy:
+            res["rule_present"] = "PRESENT"
+            res["http_8765"] = "ALLOW" if (has_http or has_legacy) else "UNKNOWN"
+            res["ws_8766"] = "ALLOW" if (has_ws or has_legacy) else "UNKNOWN"
+        else:
+            res["rule_present"] = "MISSING"
+            if res["network_profile"].lower() == "public":
+                res["http_8765"] = "BLOCK"
+                res["ws_8766"] = "BLOCK"
+            else:
+                res["http_8765"] = "UNKNOWN"
+                res["ws_8766"] = "UNKNOWN"
+    except Exception:
+        pass
+
+    return res
 
 
 def mask_token(token: str) -> str:
@@ -159,6 +209,7 @@ class PhoneDebugLogger:
             pass
 
     def get_sanitized_report(self, mode: str = "single", http_port: int = 8765, ws_port: int = 8766) -> str:
+        fw_info = get_firewall_status()
         lines = [
             "MotionDrive Phone Connection Debug Report",
             "------------------------------------------",
@@ -169,6 +220,12 @@ class PhoneDebugLogger:
             "Server Status:",
             f"  HTTP: {'● READY' if self.pipeline_state.get('http_ready') else '○ WAITING'} ({self.pipeline_state.get('http_bind', '0.0.0.0:8765')})",
             f"  WebSocket: {'● READY' if self.pipeline_state.get('ws_ready') else '○ WAITING'} ({self.pipeline_state.get('ws_bind', '0.0.0.0:8766')})",
+            "",
+            "Firewall:",
+            f"  HTTP 8765: {fw_info['http_8765']}",
+            f"  WS 8766: {fw_info['ws_8766']}",
+            f"  Network Profile: {fw_info['network_profile']}",
+            f"  MotionDrive Rule: {fw_info['rule_present']}",
             "",
         ]
 

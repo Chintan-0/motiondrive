@@ -34,6 +34,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1507+ (build 10240) minimum -- also re-checked at runtime by the app.
 MinVersion=10.0.10240
+PrivilegesRequired=admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -56,11 +57,30 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{tmp}\ViGEmBusSetup_x64.exe"; Parameters: "/quiet /norestart"; \
     StatusMsg: "Installing virtual controller driver..."; Flags: waituntilterminated skipifsilent; \
     Check: VigemRedistPresent
-Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""MotionDrive Controller Ports"" dir=in action=allow protocol=TCP localport=8765,8766 profile=any"; \
+
+; Remove legacy / previous firewall rules for idempotency
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Phone Controller HTTP"""; \
     Flags: runhidden waituntilterminated
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Phone Controller WebSocket"""; \
+    Flags: runhidden waituntilterminated
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Controller Ports"""; \
+    Flags: runhidden waituntilterminated
+
+; Create narrow, program-specific inbound firewall rules for installed MotionDrive.exe on TCP 8765 and 8766 (Private & Public profiles)
+Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""MotionDrive Phone Controller HTTP"" dir=in action=allow protocol=TCP localport=8765 program=""{app}\{#MyAppExeName}"" profile=private,public"; \
+    StatusMsg: "Configuring Windows Defender Firewall for Phone Controller (HTTP port 8765)..."; \
+    Flags: runhidden waituntilterminated
+Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""MotionDrive Phone Controller WebSocket"" dir=in action=allow protocol=TCP localport=8766 program=""{app}\{#MyAppExeName}"" profile=private,public"; \
+    StatusMsg: "Configuring Windows Defender Firewall for Phone Controller (WebSocket port 8766)..."; \
+    Flags: runhidden waituntilterminated
+
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Phone Controller HTTP"""; \
+    Flags: runhidden waituntilterminated
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Phone Controller WebSocket"""; \
+    Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""MotionDrive Controller Ports"""; \
     Flags: runhidden waituntilterminated
 
@@ -77,6 +97,28 @@ begin
   begin
     MsgBox('MotionDrive requires 64-bit Windows 10 or 11.', mbCriticalError, MB_OK);
     Result := False;
+  end;
+end;
+
+procedure VerifyFirewallRules();
+var
+  ResultCode: Integer;
+begin
+  if not Exec('netsh.exe', 'advfirewall firewall show rule name="MotionDrive Phone Controller HTTP"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    Log('FIREWALL_RULE_INSTALL_FAILED: MotionDrive Phone Controller HTTP rule missing');
+  end;
+  if not Exec('netsh.exe', 'advfirewall firewall show rule name="MotionDrive Phone Controller WebSocket"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    Log('FIREWALL_RULE_INSTALL_FAILED: MotionDrive Phone Controller WebSocket rule missing');
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    VerifyFirewallRules();
   end;
 end;
 
