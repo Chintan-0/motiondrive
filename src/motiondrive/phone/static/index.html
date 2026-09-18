@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>MotionDrive Wireless Racing Controller</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#06080d">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Portrait Orientation Banner -->
+  <div id="orientation-banner" class="banner hidden">
+    📱 ROTATE YOUR PHONE SIDEWAYS FOR THE BEST DRIVING EXPERIENCE
+  </div>
+
+  <div id="app" class="controller-container">
+    <!-- Top Cockpit Header -->
+    <header class="top-bar">
+      <div class="brand">
+        <div class="logo-emblem">MD</div>
+        <div class="brand-titles">
+          <span class="logo-text">MOTIONDRIVE</span>
+          <span id="player-badge" class="player-tag p1">PLAYER 1</span>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div id="connection-badge" class="badge connecting">
+          <span class="dot"></span>
+          <span id="status-text">CONNECTING...</span>
+        </div>
+        <div class="signal-indicator">
+          <span class="signal-bars">📶</span>
+          <span id="signal-text">GOOD</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <!-- Emergency Stop Button -->
+        <button id="btn-emergency-stop" class="emergency-stop-btn" type="button" title="Emergency Stop Inputs">
+          ⏹ STOP
+        </button>
+
+        <!-- Mode Switcher: MANUAL vs GYRO -->
+        <div class="mode-toggle">
+          <button id="mode-manual-btn" class="mode-btn active" type="button">
+            <span class="mode-icon">🎡</span> MANUAL
+          </button>
+          <button id="mode-gyro-btn" class="mode-btn" type="button">
+            <span class="mode-icon">📱</span> GYRO
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Cockpit Main Area -->
+    <main class="cockpit">
+      <!-- SHIFT / BOOST (Upper Right Overlay) -->
+      <button id="btn-shift" class="shift-boost-btn" type="button">
+        <span class="shift-icon">⚡</span>
+        <span class="shift-title">SHIFT</span>
+        <span class="shift-sub">BOOST</span>
+      </button>
+
+      <!-- 1. MANUAL MODE WORKSPACE -->
+      <section id="manual-workspace" class="workspace mode-manual active">
+        <!-- LEFT HAND: STEERING WHEEL -->
+        <div class="steering-area">
+          <div id="wheel-container" class="wheel-wrapper">
+            <span class="steer-arrow arrow-left">&lt;</span>
+            <svg id="steering-wheel" viewBox="0 0 200 200" class="wheel-svg">
+              <defs>
+                <radialGradient id="hubGrad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stop-color="#1a2538"/>
+                  <stop offset="100%" stop-color="#0b0e14"/>
+                </radialGradient>
+              </defs>
+              <!-- Outer Grip Ring -->
+              <circle cx="100" cy="100" r="88" class="wheel-rim-outer" />
+              <circle cx="100" cy="100" r="72" class="wheel-rim-inner" />
+              
+              <!-- Top Alignment Marker -->
+              <rect x="96" y="10" width="8" height="18" rx="2" class="wheel-center-mark" />
+              
+              <!-- Spokes -->
+              <path d="M 28,118 L 74,106 L 74,96 L 28,102 Z" class="wheel-spoke" />
+              <path d="M 172,118 L 126,106 L 126,96 L 172,102 Z" class="wheel-spoke" />
+              <path d="M 92,126 L 108,126 L 105,172 L 95,172 Z" class="wheel-spoke" />
+
+              <!-- Center Emblem Hub -->
+              <circle cx="100" cy="100" r="32" class="wheel-hub" />
+              <circle cx="100" cy="100" r="26" class="wheel-hub-inner" fill="url(#hubGrad)" />
+              <text x="100" y="106" class="wheel-logo-text" text-anchor="middle">MD</text>
+            </svg>
+            <span class="steer-arrow arrow-right">&gt;</span>
+          </div>
+          <div class="readout-container">
+            <span class="readout-label">STEERING</span>
+            <span id="steering-readout" class="readout-val">0%</span>
+          </div>
+        </div>
+
+        <!-- CENTER-RIGHT: BRAKE PEDAL -->
+        <div id="brake-pedal-manual" class="pedal brake-pedal pedal-manual-brake">
+          <div class="pedal-body">
+            <div class="pedal-ridges horizontal">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="pedal-footer">
+              <span class="pedal-label">BRAKE</span>
+              <span id="brake-value-manual" class="pedal-value">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- EXTREME RIGHT: THROTTLE PEDAL -->
+        <div id="gas-pedal-manual" class="pedal gas-pedal pedal-manual-gas">
+          <div class="pedal-body">
+            <div class="pedal-ridges vertical">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="pedal-footer">
+              <span class="pedal-label">THROTTLE</span>
+              <span id="gas-value-manual" class="pedal-value">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. GYRO MODE WORKSPACE -->
+      <section id="gyro-workspace" class="workspace mode-gyro hidden">
+        <!-- EXTREME LEFT: BRAKE PEDAL -->
+        <div id="brake-pedal-gyro" class="pedal brake-pedal pedal-gyro-brake">
+          <div class="pedal-body">
+            <div class="pedal-ridges horizontal">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="pedal-footer">
+              <span class="pedal-label">BRAKE</span>
+              <span id="brake-value-gyro" class="pedal-value">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CENTER: GYRO HUD STEERING VISUALIZATION -->
+        <div class="gyro-hud-area">
+          <div class="gyro-hud-card">
+            <div class="gyro-arc-wrapper">
+              <span id="gyro-arrow-left" class="gyro-arrow">&lt;</span>
+              <svg viewBox="0 0 300 120" class="gyro-arc-svg">
+                <path d="M 30,110 A 130,130 0 0,1 270,110" class="gyro-arc-bg" />
+                <path id="gyro-arc-fill" d="M 150,20 A 130,130 0 0,1 150,20" class="gyro-arc-active" />
+              </svg>
+              <span id="gyro-arrow-right" class="gyro-arrow">&gt;</span>
+            </div>
+            <div class="gyro-hud-center">
+              <span id="gyro-angle-text" class="gyro-angle">0°</span>
+              <span class="gyro-sub-text">TILT TO STEER</span>
+            </div>
+          </div>
+
+          <div class="gyro-controls-bar">
+            <button id="recenter-gyro-btn" class="hud-btn" type="button">
+              <span class="hud-icon">🎯</span> RECENTER
+            </button>
+            <span class="hud-info">TILT LEFT OR RIGHT • CAR RESPONDS NATURALLY</span>
+          </div>
+        </div>
+
+        <!-- EXTREME RIGHT: THROTTLE PEDAL -->
+        <div id="gas-pedal-gyro" class="pedal gas-pedal pedal-gyro-gas">
+          <div class="pedal-body">
+            <div class="pedal-ridges vertical">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="pedal-footer">
+              <span class="pedal-label">THROTTLE</span>
+              <span id="gas-value-gyro" class="pedal-value">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Gyro Alert / Sensor Unavailable Banner -->
+      <div id="gyro-alert-banner" class="alert-banner hidden">
+        <span id="gyro-alert-text">GYRO UNAVAILABLE ON THIS DEVICE</span>
+        <button id="fallback-manual-btn" class="fallback-btn" type="button">SWITCH TO MANUAL</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

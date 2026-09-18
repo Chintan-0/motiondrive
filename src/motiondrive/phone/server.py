@@ -1,0 +1,566 @@
+"""Local Wi-Fi Phone Controller Server for MotionDrive Desktop.
+
+Hosts a lightweight HTTP static server on port 8765 and a PySide6 QWebSocketServer
+on port 8766. Handles local session pairing, single-phone policy, heartbeat
+watchdog, and emits normalized control signals.
+"""
+from __future__ import annotations
+
+import http.server
+import json
+import socket
+import struct
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Signal, QTimer, Qt, QByteArray
+from PySide6.QtNetwork import QHostAddress
+from PySide6.QtWebSockets import QWebSocketServer, QWebSocket
+
+from motiondrive.logging_ import get_logger
+from motiondrive.paths import resource_path
+from motiondrive.phone.qrcode_gen import generate_qr_svg
+
+log = get_logger(__name__)
+
+try:
+    from zeroconf import Zeroconf, ServiceInfo
+    _ZEROCONF_AVAILABLE = True
+except ImportError:
+    _ZEROCONF_AVAILABLE = False
+
+
+def mask_token(token: str) -> str:
+    """Masks secret session token for safe logging output (e.g. sec_p1_****5413)."""
+    if not token:
+        return "<none>"
+    if len(token) <= 8:
+        return "****"
+    return f"{token[:7]}****{token[-4:]}"
+
+
+def get_local_ip() -> str:
+    """Finds active local IPv4 address on Wi-Fi, Hotspot, or LAN interface.
+
+    Filters out loopback (127.0.0.1), link-local (169.254.x.x), and virtual
+    adapters (vEthernet, WSL, Docker, VMware, VirtualBox, Bluetooth).
+    """
+    candidates = []
+    wifi_lan_candidates = []
+
+    # 1. Probe routing table via UDP socket
+    probe_ip = None
+    for target in [("8.8.8.8", 80), ("1.1.1.1", 80), ("10.255.255.255", 1)]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(target)
+            probe_ip = s.getsockname()[0]
+            s.close()
+            if probe_ip and not probe_ip.startswith("127.") and not probe_ip.startswith("169.254."):
+                break
+        except Exception:
+            pass
+
+    # 2. Inspect network interfaces via psutil
+    try:
+        import psutil
+        stats = psutil.net_if_stats() if hasattr(psutil, "net_if_stats") else {}
+        for iface, addrs in psutil.net_if_addrs().items():
+            iface_lower = iface.lower()
+            if any(bad in iface_lower for bad in ["vethernet", "wsl", "docker", "vmware", "virtualbox", "loopback", "bluetooth"]):
+                continue
+            if iface in stats and not stats[iface].isup:
+                continue
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    ip = addr.address
+                    if ip.startswith("127.") or ip.startswith("169.254."):
+                        continue
+                    candidates.append((iface, ip))
+                    if any(w in iface_lower for w in ["wi-fi", "wifi", "wireless", "wlan", "hotspot", "ethernet", "lan"]):
+                        wifi_lan_candidates.append((iface, ip))
+    except Exception:
+        pass
+
+    log.debug("Network interface IP candidates: %s (probe_ip=%s)", candidates, probe_ip)
+
+    if probe_ip and any(ip == probe_ip for _, ip in candidates):
+        return probe_ip
+    if wifi_lan_candidates:
+        return wifi_lan_candidates[0][1]
+    if candidates:
+        return candidates[0][1]
+    return probe_ip or "127.0.0.1"
+
+
+def ensure_firewall_rules() -> bool:
+    """Helper to programmatically add narrow Windows Firewall rules for MotionDrive controller ports (TCP 8765, 8766)."""
+    import sys
+    if sys.platform != "win32":
+        return True
+    try:
+        import subprocess
+        cmd = (
+            'netsh advfirewall firewall add rule name="MotionDrive Controller Ports" '
+            'dir=in action=allow protocol=TCP localport=8765,8766 profile=any'
+        )
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if res.returncode == 0:
+            log.info("Windows Firewall rule 'MotionDrive Controller Ports' verified/added (TCP 8765, 8766)")
+            return True
+        else:
+            log.debug("Could not add firewall rule (non-fatal, requires elevation): %s", res.stderr.strip())
+            return False
+    except Exception as e:
+        log.debug("Firewall check skipped: %s", e)
+        return False
+
+
+def get_static_dir() -> Path:
+    """Resolves the directory containing mobile controller static files."""
+    static_dir = resource_path("src/motiondrive/phone/static")
+    if static_dir.exists() and (static_dir / "index.html").exists():
+        return static_dir
+    fallback = resource_path("phone_static")
+    if fallback.exists() and (fallback / "index.html").exists():
+        return fallback
+    return static_dir
+
+
+class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
+    """Serves mobile controller static files and health endpoint."""
+
+    def __init__(self, *args, directory=None, **kwargs):
+        static_dir = str(get_static_dir())
+        super().__init__(*args, directory=static_dir, **kwargs)
+
+    def do_GET(self):
+        clean_path = self.path.split("?")[0].rstrip("/")
+        if clean_path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            body = json.dumps({"status": "ok", "app": "MotionDrive"}).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+    def log_message(self, format, *args):
+        pass  # Suppress noisy HTTP access logs
+
+
+@dataclass
+class PlayerSession:
+    player_id: int
+    session_token: str
+    socket: QWebSocket | None = None
+    connected: bool = False
+    last_packet_time: float = 0.0
+    client_ip: str = ""
+    steering: float = 0.0
+    throttle: float = 0.0
+    brake: float = 0.0
+    shift: bool = False
+
+
+class PhoneControllerServer(QObject):
+    """Local network server for Phone Controller pairing & WebSocket streaming supporting up to 2 players."""
+
+    # Signals: (player_id, steering, throttle, brake, shift, timestamp)
+    input_received = Signal(int, float, float, float, bool, float)
+    phone_connected = Signal(int, str)                     # (player_id, client_ip)
+    phone_disconnected = Signal(int)                       # (player_id)
+    connection_lost = Signal(int)                        # (player_id) watchdog timeout trigger
+    session_rejected = Signal(str, str)                    # (client_ip, reason)
+
+    HTTP_PORT = 8765
+    WS_PORT = 8766
+    WATCHDOG_TIMEOUT_SEC = 1.25                          # Neutralize if no packet for 1.25s
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.local_ip = get_local_ip()
+        self.running = False
+        self.active_ws_port = self.WS_PORT
+
+        self.sessions: dict[int, PlayerSession] = {}
+        self.urls: dict[int, str] = {}
+        self._socket_map: dict[QWebSocket, int] = {}
+
+        self._http_server: http.server.ThreadingHTTPServer | None = None
+        self._http_thread: threading.Thread | None = None
+        self._ws_server: QWebSocketServer | None = None
+
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(250)
+        self._watchdog_timer.timeout.connect(self._check_watchdog)
+
+    @property
+    def session_token(self) -> str:
+        return self.sessions[1].session_token if 1 in self.sessions else ""
+
+    @property
+    def local_url(self) -> str:
+        return self.get_local_url(1)
+
+    def get_local_url(self, player_id: int = 1) -> str:
+        return self.urls.get(player_id, "")
+
+    def start(self) -> bool:
+        """Starts HTTP server & WebSocket server with new random session tokens for Player 1 and Player 2."""
+        if self.running:
+            return True
+
+        self.local_ip = get_local_ip()
+        ensure_firewall_rules()
+
+        # Initialize slots for Player 1 and Player 2
+        for pid in (1, 2):
+            token = f"sec_p{pid}_{uuid.uuid4().hex[:8]}"
+            self.sessions[pid] = PlayerSession(player_id=pid, session_token=token)
+
+        # 1. Start HTTP Static File Server listening on ALL interfaces (0.0.0.0)
+        try:
+            log.info("PHONE HTTP SERVER STARTING host=0.0.0.0 port=%d", self.HTTP_PORT)
+            self._http_server = http.server.ThreadingHTTPServer(
+                ("0.0.0.0", self.HTTP_PORT), _StaticHTTPHandler
+            )
+            self._http_thread = threading.Thread(
+                target=self._http_server.serve_forever, daemon=True
+            )
+            self._http_thread.start()
+            log.info("PHONE HTTP SERVER READY bound_port=%d", self.HTTP_PORT)
+            log.info("Phone HTTP Server listening on 0.0.0.0:%d (reachable at http://%s:%d)", self.HTTP_PORT, self.local_ip, self.HTTP_PORT)
+        except Exception as e:
+            log.exception("Failed to start Phone HTTP Server on port %d: %s", self.HTTP_PORT, e)
+            return False
+
+        # 2. Start PySide6 QWebSocketServer bound explicitly to QHostAddress.AnyIPv4 (0.0.0.0)
+        ws_bound = False
+        for port in range(self.WS_PORT, self.WS_PORT + 10):
+            try:
+                self._ws_server = QWebSocketServer(
+                    "MotionDrivePhoneServer", QWebSocketServer.NonSecureMode, self
+                )
+                if self._ws_server.listen(QHostAddress.AnyIPv4, port):
+                    self.active_ws_port = port
+                    self._ws_server.newConnection.connect(self._on_new_connection)
+                    log.info("Phone WebSocket Server listening on 0.0.0.0:%d (reachable at ws://%s:%d)", port, self.local_ip, port)
+                    ws_bound = True
+                    break
+                else:
+                    err_str = self._ws_server.errorString()
+                    log.warning("QWebSocketServer listen failed on port %d: %s", port, err_str)
+                    self._ws_server.close()
+                    self._ws_server = None
+            except Exception as e:
+                log.warning("QWebSocketServer bind exception on port %d: %s", port, e)
+                if self._ws_server is not None:
+                    self._ws_server.close()
+                    self._ws_server = None
+
+        if not ws_bound:
+            log.error("Failed to bind Phone WebSocket Server to any port in range %d-%d", self.WS_PORT, self.WS_PORT + 10)
+            return False
+
+        for pid in (1, 2):
+            self.urls[pid] = f"http://{self.local_ip}:{self.HTTP_PORT}/?session={self.sessions[pid].session_token}&player={pid}&ws_port={self.active_ws_port}"
+
+        log.info("PHONE URL (P1): http://%s:%d/?session=%s&player=1&ws_port=%d", self.local_ip, self.HTTP_PORT, mask_token(self.sessions[1].session_token), self.active_ws_port)
+        log.info("PHONE URL (P2): http://%s:%d/?session=%s&player=2&ws_port=%d", self.local_ip, self.HTTP_PORT, mask_token(self.sessions[2].session_token), self.active_ws_port)
+        log.info("Phone Controller Server ready (P1: %s, P2: %s)", self.urls[1], self.urls[2])
+        self._start_mdns()
+        self.running = True
+        self._watchdog_timer.start()
+        return True
+
+    def stop(self) -> None:
+        """Stops all servers, closes active sockets, and neutralizes control state for all players."""
+        self.running = False
+        self._watchdog_timer.stop()
+        self._stop_mdns()
+
+        for pid, session in self.sessions.items():
+            if session.socket is not None:
+                try:
+                    session.socket.close()
+                except Exception:
+                    pass
+                session.socket = None
+                session.connected = False
+
+        self._socket_map.clear()
+
+        if self._ws_server is not None:
+            try:
+                self._ws_server.close()
+            except Exception:
+                pass
+            self._ws_server = None
+
+        if self._http_server is not None:
+            try:
+                self._http_server.shutdown()
+                self._http_server.server_close()
+            except Exception:
+                pass
+            self._http_server = None
+
+        self._neutralize_all("Server stopped")
+        log.info("Phone Controller Server stopped")
+
+    def _start_mdns(self) -> None:
+        if not _ZEROCONF_AVAILABLE or not self.local_ip:
+            return
+        try:
+            self._zeroconf = Zeroconf()
+            self._mdns_info = ServiceInfo(
+                "_http._tcp.local.",
+                "MotionDrive Phone Controller._http._tcp.local.",
+                addresses=[socket.inet_aton(self.local_ip)],
+                port=self.HTTP_PORT,
+                properties={"path": "/"},
+                server="motiondrive.local.",
+            )
+            self._zeroconf.register_service(self._mdns_info)
+            log.info("mDNS registered: motiondrive.local.")
+        except Exception as e:
+            log.warning("mDNS registration failed (non-fatal): %s", e)
+            self._zeroconf = None
+            self._mdns_info = None
+
+    def _stop_mdns(self) -> None:
+        if getattr(self, "_zeroconf", None) is not None:
+            try:
+                if getattr(self, "_mdns_info", None) is not None:
+                    self._zeroconf.unregister_service(self._mdns_info)
+                self._zeroconf.close()
+            except Exception:
+                pass
+            self._zeroconf = None
+            self._mdns_info = None
+
+    def get_qr_svg(self, player_id: int = 1) -> str:
+        """Generates QR Code SVG string for the specified player connection URL."""
+        return generate_qr_svg(self.get_local_url(player_id))
+
+    def _on_new_connection(self) -> None:
+        if self._ws_server is None:
+            return
+        socket = self._ws_server.nextPendingConnection()
+        client_ip = socket.peerAddress().toString()
+        port = socket.peerPort()
+
+        socket.textMessageReceived.connect(lambda msg, s=socket: self._on_message_received(msg, s))
+        socket.binaryMessageReceived.connect(lambda data, s=socket: self._on_binary_message_received(data, s))
+        socket.disconnected.connect(lambda s=socket: self._on_socket_disconnected(s))
+        log.info("PHONE WS CONNECT connection_id=%s:%d", client_ip, port)
+
+    def _authenticate_socket(self, socket: QWebSocket, token: str) -> int | None:
+        client_ip = socket.peerAddress().toString()
+        masked = mask_token(token)
+
+        target_pid = None
+        for pid, session in self.sessions.items():
+            if session.session_token == token:
+                target_pid = pid
+                break
+
+        log.info("SESSION RECEIVED player_from_query=%s session_valid=%s assigned_player=%s session=%s client=%s",
+                 target_pid if target_pid else "none",
+                 target_pid is not None,
+                 target_pid if target_pid else "none",
+                 masked, client_ip)
+
+        if target_pid is None:
+            log.warning("SESSION REJECTED reason=Invalid session token session=%s client=%s", masked, client_ip)
+            self.session_rejected.emit(client_ip, "Invalid session token")
+            reject_msg = json.dumps({
+                "version": 1,
+                "type": "rejected",
+                "message": "Invalid session token."
+            })
+            try:
+                socket.sendTextMessage(reject_msg)
+                socket.close()
+            except Exception:
+                pass
+            return None
+
+        session = self.sessions[target_pid]
+        if session.connected and session.socket is not None and session.socket != socket:
+            log.warning("SESSION REJECTED reason=Slot occupied player=%d session=%s client=%s", target_pid, masked, client_ip)
+            self.session_rejected.emit(client_ip, f"Player {target_pid} slot occupied")
+            reject_msg = json.dumps({
+                "version": 1,
+                "type": "rejected",
+                "message": f"Player {target_pid} slot is occupied."
+            })
+            try:
+                socket.sendTextMessage(reject_msg)
+                socket.close()
+            except Exception:
+                pass
+            return None
+
+        log.info("SESSION VALID player=%d session=%s client=%s", target_pid, masked, client_ip)
+        session.socket = socket
+        session.connected = True
+        session.client_ip = client_ip
+        session.steering = 0.0
+        session.throttle = 0.0
+        session.brake = 0.0
+        session.shift = False
+        session.last_packet_time = time.time()
+        self._socket_map[socket] = target_pid
+        self._neutralize_player(target_pid, "Socket authenticated reset")
+        log.info("PLAYER SESSION CONNECTED player=%d client=%s", target_pid, client_ip)
+        log.info("CONNECTION CALLBACK EMITTED player=%d client=%s", target_pid, client_ip)
+        self.phone_connected.emit(target_pid, client_ip)
+        return target_pid
+
+    def _on_socket_disconnected(self, socket: QWebSocket) -> None:
+        pid = self._socket_map.pop(socket, None)
+        if pid is not None:
+            session = self.sessions.get(pid)
+            if session and session.socket == socket:
+                log.info("Player %d disconnected", pid)
+                session.socket = None
+                session.connected = False
+                self._neutralize_player(pid, "Phone disconnected")
+                self.phone_disconnected.emit(pid)
+
+    def _on_binary_message_received(self, data: bytes | QByteArray, socket: QWebSocket) -> None:
+        pid = self._socket_map.get(socket)
+        if pid is None:
+            return  # Pending authentication via handshake/token
+
+        session = self.sessions[pid]
+        if isinstance(data, QByteArray):
+            data = bytes(data)
+        if len(data) < 6:
+            return
+        try:
+            steering_raw, throttle_raw, brake_raw, flags, seq = struct.unpack("<hBBBB", data[:6])
+        except Exception:
+            log.exception("Malformed 6-byte binary packet received")
+            return
+
+        steering = max(-1.0, min(1.0, steering_raw / 32767.0))
+        throttle = max(0.0, min(1.0, throttle_raw / 255.0))
+        brake = max(0.0, min(1.0, brake_raw / 255.0))
+        shift = bool(flags & 0x01)
+        emergency_stop = bool(flags & 0x04)
+
+        ts = time.time()
+        session.last_packet_time = ts
+
+        if emergency_stop:
+            log.warning("Received Emergency Stop signal from Player %d phone binary packet", pid)
+            self._neutralize_all("Phone Emergency Stop")
+            parent_obj = self.parent()
+            if parent_obj is not None and hasattr(parent_obj, "emergency_stop"):
+                parent_obj.emergency_stop()
+            return
+
+        session.steering = steering
+        session.throttle = throttle
+        session.brake = brake
+        session.shift = shift
+
+        self.input_received.emit(pid, steering, throttle, brake, shift, ts)
+
+        if hasattr(socket, "state"):
+            try:
+                from PySide6.QtNetwork import QAbstractSocket
+                if socket.state() != QAbstractSocket.SocketState.ConnectedState:
+                    return
+            except Exception:
+                pass
+
+    def _on_message_received(self, message: str, socket: QWebSocket) -> None:
+        try:
+            data = json.loads(message)
+        except Exception:
+            return
+
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return
+
+        token = data.get("session", "")
+        pid = self._socket_map.get(socket)
+
+        if pid is None:
+            pid = self._authenticate_socket(socket, token)
+            if pid is None:
+                return
+
+        session = self.sessions[pid]
+        msg_type = data.get("type", "")
+        if msg_type == "handshake":
+            session.last_packet_time = time.time()
+            ack_msg = json.dumps({
+                "version": 1,
+                "type": "handshake_ack",
+                "player": pid,
+                "authenticated": True
+            })
+            try:
+                socket.sendTextMessage(ack_msg)
+            except Exception:
+                pass
+            return
+
+        if msg_type == "input":
+            steering = float(data.get("steering", 0.0))
+            throttle = float(data.get("throttle", 0.0))
+            brake = float(data.get("brake", 0.0))
+            shift = bool(data.get("shift", False))
+
+            steering = max(-1.0, min(1.0, steering))
+            throttle = max(0.0, min(1.0, throttle))
+            brake = max(0.0, min(1.0, brake))
+
+            ts = float(data.get("timestamp", time.time()))
+            session.last_packet_time = time.time()
+
+            session.steering = steering
+            session.throttle = throttle
+            session.brake = brake
+            session.shift = shift
+
+            self.input_received.emit(pid, steering, throttle, brake, shift, ts)
+
+            try:
+                socket.sendTextMessage(json.dumps({"type": "ack", "ts": ts}))
+            except Exception:
+                pass
+
+    def _check_watchdog(self) -> None:
+        if not self.running:
+            return
+        now = time.time()
+        for pid, session in list(self.sessions.items()):
+            if session.connected and session.last_packet_time > 0 and (now - session.last_packet_time) > self.WATCHDOG_TIMEOUT_SEC:
+                log.warning("Player %d connection watchdog timeout -- neutralizing input", pid)
+                self.connection_lost.emit(pid)
+                self._neutralize_player(pid, "Watchdog timeout")
+
+    def _neutralize_player(self, player_id: int, reason: str) -> None:
+        session = self.sessions.get(player_id)
+        if session:
+            session.steering = 0.0
+            session.throttle = 0.0
+            session.brake = 0.0
+            session.shift = False
+            session.last_packet_time = 0.0
+            self.input_received.emit(player_id, 0.0, 0.0, 0.0, False, time.time())
+
+    def _neutralize_all(self, reason: str) -> None:
+        for pid in list(self.sessions):
+            self._neutralize_player(pid, reason)
