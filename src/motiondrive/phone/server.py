@@ -46,31 +46,50 @@ def get_local_ip() -> str:
     """Finds active local IPv4 address on Wi-Fi, Hotspot, or LAN interface.
 
     Filters out loopback (127.0.0.1), link-local (169.254.x.x), and virtual
-    adapters (vEthernet, WSL, Docker, VMware, VirtualBox, Bluetooth).
+    adapters (vEthernet, WSL, Docker, VMware, VirtualBox, Hyper-V, VPN, etc).
     """
     candidates = []
     wifi_lan_candidates = []
 
-    # 1. Probe routing table via UDP socket
+    virtual_keywords = [
+        "vethernet", "wsl", "docker", "vmware", "virtualbox", "loopback",
+        "bluetooth", "hyper-v", "default switch", "virtual", "vpn",
+        "wireguard", "tailscale", "zerotier", "hamachi", "tap", "tun",
+        "npcap", "pcap", "pseudo"
+    ]
+
+    # 1. Multi-target UDP routing probe (probes external WAN + local gateway subnets)
     probe_ip = None
-    for target in [("8.8.8.8", 80), ("1.1.1.1", 80), ("10.255.255.255", 1)]:
+    probe_targets = [
+        ("8.8.8.8", 80),         # Google DNS (Standard WAN)
+        ("1.1.1.1", 80),         # Cloudflare DNS (Standard WAN)
+        ("192.168.43.1", 80),     # Android Hotspot default gateway
+        ("172.20.10.1", 80),      # iOS Hotspot default gateway
+        ("192.168.1.1", 80),      # Standard Wi-Fi router gateway
+        ("192.168.0.1", 80),      # Standard Wi-Fi router gateway
+        ("10.0.0.1", 80),         # Enterprise LAN router gateway
+    ]
+
+    for target in probe_targets:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.2)
             s.connect(target)
-            probe_ip = s.getsockname()[0]
+            ip = s.getsockname()[0]
             s.close()
-            if probe_ip and not probe_ip.startswith("127.") and not probe_ip.startswith("169.254."):
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                probe_ip = ip
                 break
         except Exception:
             pass
 
-    # 2. Inspect network interfaces via psutil
+    # 2. Inspect active network interfaces via psutil
     try:
         import psutil
         stats = psutil.net_if_stats() if hasattr(psutil, "net_if_stats") else {}
         for iface, addrs in psutil.net_if_addrs().items():
             iface_lower = iface.lower()
-            if any(bad in iface_lower for bad in ["vethernet", "wsl", "docker", "vmware", "virtualbox", "loopback", "bluetooth"]):
+            if any(bad in iface_lower for bad in virtual_keywords):
                 continue
             if iface in stats and not stats[iface].isup:
                 continue
@@ -85,15 +104,23 @@ def get_local_ip() -> str:
     except Exception:
         pass
 
-    log.debug("Network interface IP candidates: %s (probe_ip=%s)", candidates, probe_ip)
+    log.info("DISCOVERY: Network IP candidates=%s (probe_ip=%s)", candidates, probe_ip)
 
     if probe_ip and any(ip == probe_ip for _, ip in candidates):
+        log.info("DISCOVERY: Selected probe IPv4 %s", probe_ip)
         return probe_ip
     if wifi_lan_candidates:
-        return wifi_lan_candidates[0][1]
+        selected = wifi_lan_candidates[0][1]
+        log.info("DISCOVERY: Selected wifi/lan IPv4 %s (%s)", selected, wifi_lan_candidates[0][0])
+        return selected
     if candidates:
-        return candidates[0][1]
-    return probe_ip or "127.0.0.1"
+        selected = candidates[0][1]
+        log.info("DISCOVERY: Selected candidate IPv4 %s (%s)", selected, candidates[0][0])
+        return selected
+
+    final_ip = probe_ip or "127.0.0.1"
+    log.info("DISCOVERY: Fallback IPv4 %s", final_ip)
+    return final_ip
 
 
 def ensure_firewall_rules() -> bool:
@@ -138,6 +165,8 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=static_dir, **kwargs)
 
     def do_GET(self):
+        client_ip = self.client_address[0] if hasattr(self, "client_address") else "unknown"
+        log.info("PHONE_HTTP_REQUEST client_ip=%s path=%s", client_ip, self.path)
         clean_path = self.path.split("?")[0].rstrip("/")
         if clean_path == "/health":
             self.send_response(200)
@@ -147,6 +176,7 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            log.info("PHONE_HTTP_HEALTH_OK client_ip=%s", client_ip)
             return
         super().do_GET()
 
@@ -359,7 +389,7 @@ class PhoneControllerServer(QObject):
         socket.textMessageReceived.connect(lambda msg, s=socket: self._on_message_received(msg, s))
         socket.binaryMessageReceived.connect(lambda data, s=socket: self._on_binary_message_received(data, s))
         socket.disconnected.connect(lambda s=socket: self._on_socket_disconnected(s))
-        log.info("PHONE WS CONNECT connection_id=%s:%d", client_ip, port)
+        log.info("WS_TCP_CONNECTED client_ip=%s port=%d", client_ip, port)
 
     def _authenticate_socket(self, socket: QWebSocket, token: str) -> int | None:
         client_ip = socket.peerAddress().toString()
@@ -420,7 +450,7 @@ class PhoneControllerServer(QObject):
         self._socket_map[socket] = target_pid
         self._neutralize_player(target_pid, "Socket authenticated reset")
         log.info("PLAYER SESSION CONNECTED player=%d client=%s", target_pid, client_ip)
-        log.info("CONNECTION CALLBACK EMITTED player=%d client=%s", target_pid, client_ip)
+        log.info("PHONE_CONNECTED_SIGNAL player=%d client=%s", target_pid, client_ip)
         self.phone_connected.emit(target_pid, client_ip)
         return target_pid
 
@@ -503,6 +533,7 @@ class PhoneControllerServer(QObject):
         session = self.sessions[pid]
         msg_type = data.get("type", "")
         if msg_type == "handshake":
+            log.info("WS_HANDSHAKE_RECEIVED player=%d session=%s client_ip=%s", pid, mask_token(token), session.client_ip)
             session.last_packet_time = time.time()
             ack_msg = json.dumps({
                 "version": 1,
@@ -512,6 +543,7 @@ class PhoneControllerServer(QObject):
             })
             try:
                 socket.sendTextMessage(ack_msg)
+                log.info("WS_HANDSHAKE_ACCEPTED player=%d client_ip=%s", pid, session.client_ip)
             except Exception:
                 pass
             return

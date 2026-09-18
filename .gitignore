@@ -3,9 +3,12 @@
 venv/
 ENV/
 
-# Build & Dist
+# Build & Dist & Binaries
 build/
 dist/
+installer/*.exe
+installer/redist/*.exe
+installer/redist/*.msi
 
 # Python cache
 __pycache__/
@@ -18,5 +21,6 @@ htmlcov/
 # IDE / OS
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db

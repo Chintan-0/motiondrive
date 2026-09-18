@@ -693,5 +693,15 @@ def test_qr_url_format_and_session_masking(qapp):
     qapp.processEvents()
 
 
+def test_get_local_ip_filtering_and_fallback():
+    from motiondrive.phone.server import get_local_ip
+    ip = get_local_ip()
+    assert isinstance(ip, str)
+    assert len(ip) > 0
+    assert not ip.startswith("169.254.")
+    assert not ip.startswith("127.0.0.1") or ip == "127.0.0.1"
+
+
+
 
 
