@@ -87,11 +87,21 @@ class DummyAddress:
 
 
 class DummySocket:
+    def __init__(self):
+        self._props = {}
+
     def peerAddress(self):
         return DummyAddress()
 
     def state(self):
         return 3  # ConnectedState integer code
+
+    def property(self, key):
+        return self._props.get(key)
+
+    def setProperty(self, key, val):
+        self._props[key] = val
+        return True
 
     def sendTextMessage(self, msg):
         pass
@@ -700,6 +710,46 @@ def test_get_local_ip_filtering_and_fallback():
     assert len(ip) > 0
     assert not ip.startswith("169.254.")
     assert not ip.startswith("127.0.0.1") or ip == "127.0.0.1"
+
+
+def test_debug_logger_and_report_sanitization(qapp):
+    from motiondrive.phone.debug_logger import PhoneDebugLogger, mask_token
+    dbg = PhoneDebugLogger.get_instance()
+    dbg.clear_log()
+    assert len(dbg.events) == 0
+
+    # Test token masking in log call
+    raw_token = "sec_p1_abc123456"
+    dbg.log("TEST_COMP", "TEST_EVENT", session_token=raw_token, player=1)
+
+    assert len(dbg.events) >= 1
+    ev = dbg.events[-1]
+    assert raw_token not in ev["raw"]
+    assert "sec_p1_****3456" in ev["raw"]
+
+    report = dbg.get_sanitized_report(mode="single")
+    assert raw_token not in report
+    assert "MotionDrive Phone Connection Debug Report" in report
+
+    dbg.clear_log()
+    assert len(dbg.events) == 0
+
+
+def test_debug_logger_local_network_test(qapp):
+    from motiondrive.phone.debug_logger import PhoneDebugLogger
+    server = PhoneControllerServer()
+    assert server.start() is True
+
+    try:
+        dbg = PhoneDebugLogger.get_instance()
+        res = dbg.run_local_network_test(server.HTTP_PORT, server.active_ws_port)
+        assert res["http"] is True
+        assert res["ws"] is True
+        assert len(res["details"]) >= 3
+    finally:
+        server.stop()
+        qapp.processEvents()
+
 
 
 

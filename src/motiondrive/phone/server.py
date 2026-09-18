@@ -198,6 +198,17 @@ class PlayerSession:
     shift: bool = False
 
 
+def _get_socket_conn_id(socket: Any) -> str:
+    try:
+        if hasattr(socket, "property") and callable(getattr(socket, "property")):
+            cid = socket.property("connection_id")
+            if cid:
+                return str(cid)
+    except Exception:
+        pass
+    return "WS-UNKNOWN"
+
+
 class PhoneControllerServer(QObject):
     """Local network server for Phone Controller pairing & WebSocket streaming supporting up to 2 players."""
 
@@ -246,8 +257,14 @@ class PhoneControllerServer(QObject):
         if self.running:
             return True
 
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+
         self.local_ip = get_local_ip()
+        dbg.pipeline_state["selected_ip"] = self.local_ip
         ensure_firewall_rules()
+
+        dbg.log("PHONE_SERVER", "PHONE_SERVER_START", http_bind=f"0.0.0.0:{self.HTTP_PORT}", ws_bind=f"0.0.0.0:{self.WS_PORT}", local_ip=self.local_ip)
 
         # Initialize slots for Player 1 and Player 2
         for pid in (1, 2):
@@ -257,6 +274,7 @@ class PhoneControllerServer(QObject):
         # 1. Start HTTP Static File Server listening on ALL interfaces (0.0.0.0)
         try:
             log.info("PHONE HTTP SERVER STARTING host=0.0.0.0 port=%d", self.HTTP_PORT)
+            dbg.log("PHONE_SERVER", "HTTP_SERVER_START", bind="0.0.0.0", port=self.HTTP_PORT)
             self._http_server = http.server.ThreadingHTTPServer(
                 ("0.0.0.0", self.HTTP_PORT), _StaticHTTPHandler
             )
@@ -264,14 +282,19 @@ class PhoneControllerServer(QObject):
                 target=self._http_server.serve_forever, daemon=True
             )
             self._http_thread.start()
+            dbg.pipeline_state["http_ready"] = True
+            dbg.pipeline_state["http_bind"] = f"0.0.0.0:{self.HTTP_PORT}"
             log.info("PHONE HTTP SERVER READY bound_port=%d", self.HTTP_PORT)
+            dbg.log("PHONE_SERVER", "HTTP_SERVER_READY", listen=f"0.0.0.0:{self.HTTP_PORT}")
             log.info("Phone HTTP Server listening on 0.0.0.0:%d (reachable at http://%s:%d)", self.HTTP_PORT, self.local_ip, self.HTTP_PORT)
         except Exception as e:
             log.exception("Failed to start Phone HTTP Server on port %d: %s", self.HTTP_PORT, e)
+            dbg.log("PHONE_SERVER", "HTTP_SERVER_ERROR", bind="0.0.0.0", port=self.HTTP_PORT, error=str(e), level="ERROR")
             return False
 
         # 2. Start PySide6 QWebSocketServer bound explicitly to QHostAddress.AnyIPv4 (0.0.0.0)
         ws_bound = False
+        dbg.log("PHONE_SERVER", "WS_SERVER_START", bind="0.0.0.0", port=self.WS_PORT)
         for port in range(self.WS_PORT, self.WS_PORT + 10):
             try:
                 self._ws_server = QWebSocketServer(
@@ -280,7 +303,10 @@ class PhoneControllerServer(QObject):
                 if self._ws_server.listen(QHostAddress.AnyIPv4, port):
                     self.active_ws_port = port
                     self._ws_server.newConnection.connect(self._on_new_connection)
+                    dbg.pipeline_state["ws_ready"] = True
+                    dbg.pipeline_state["ws_bind"] = f"0.0.0.0:{port}"
                     log.info("Phone WebSocket Server listening on 0.0.0.0:%d (reachable at ws://%s:%d)", port, self.local_ip, port)
+                    dbg.log("PHONE_SERVER", "WS_SERVER_READY", listen=f"0.0.0.0:{port}")
                     ws_bound = True
                     break
                 else:
@@ -296,10 +322,21 @@ class PhoneControllerServer(QObject):
 
         if not ws_bound:
             log.error("Failed to bind Phone WebSocket Server to any port in range %d-%d", self.WS_PORT, self.WS_PORT + 10)
+            dbg.log("PHONE_SERVER", "WS_SERVER_ERROR", bind="0.0.0.0", range=f"{self.WS_PORT}-{self.WS_PORT+10}", level="ERROR")
             return False
 
         for pid in (1, 2):
             self.urls[pid] = f"http://{self.local_ip}:{self.HTTP_PORT}/?session={self.sessions[pid].session_token}&player={pid}&ws_port={self.active_ws_port}"
+            dbg.log(
+                "QR_GENERATED",
+                "QR_GENERATED",
+                player=pid,
+                http_host=self.local_ip,
+                http_port=self.HTTP_PORT,
+                ws_host=self.local_ip,
+                ws_port=self.active_ws_port,
+                session_prefix=self.sessions[pid].session_token[:7],
+            )
 
         log.info("PHONE URL (P1): http://%s:%d/?session=%s&player=1&ws_port=%d", self.local_ip, self.HTTP_PORT, mask_token(self.sessions[1].session_token), self.active_ws_port)
         log.info("PHONE URL (P2): http://%s:%d/?session=%s&player=2&ws_port=%d", self.local_ip, self.HTTP_PORT, mask_token(self.sessions[2].session_token), self.active_ws_port)
@@ -382,18 +419,34 @@ class PhoneControllerServer(QObject):
     def _on_new_connection(self) -> None:
         if self._ws_server is None:
             return
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+
         socket = self._ws_server.nextPendingConnection()
         client_ip = socket.peerAddress().toString()
         port = socket.peerPort()
+        conn_id = dbg.next_connection_id()
+        if hasattr(socket, "setProperty") and callable(getattr(socket, "setProperty")):
+            try:
+                socket.setProperty("connection_id", conn_id)
+            except Exception:
+                pass
 
         socket.textMessageReceived.connect(lambda msg, s=socket: self._on_message_received(msg, s))
         socket.binaryMessageReceived.connect(lambda data, s=socket: self._on_binary_message_received(data, s))
         socket.disconnected.connect(lambda s=socket: self._on_socket_disconnected(s))
-        log.info("WS_TCP_CONNECTED client_ip=%s port=%d", client_ip, port)
+        log.info("WS_TCP_CONNECTED client_ip=%s port=%d connection_id=%s", client_ip, port, conn_id)
+        dbg.log("PHONE_SERVER", "WS_TCP_CONNECTED", connection_id=conn_id, client_ip=client_ip, client_port=port)
 
     def _authenticate_socket(self, socket: QWebSocket, token: str) -> int | None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        conn_id = _get_socket_conn_id(socket)
+
         client_ip = socket.peerAddress().toString()
         masked = mask_token(token)
+
+        dbg.log("PHONE_SERVER", "SESSION_AUTH_START", connection_id=conn_id, player_query=token[:7] if token else "none", client_ip=client_ip)
 
         target_pid = None
         for pid, session in self.sessions.items():
@@ -409,6 +462,7 @@ class PhoneControllerServer(QObject):
 
         if target_pid is None:
             log.warning("SESSION REJECTED reason=Invalid session token session=%s client=%s", masked, client_ip)
+            dbg.log("PHONE_SERVER", "SESSION_AUTH_FAILED", connection_id=conn_id, reason="invalid_token", client_ip=client_ip, level="WARN")
             self.session_rejected.emit(client_ip, "Invalid session token")
             reject_msg = json.dumps({
                 "version": 1,
@@ -425,6 +479,7 @@ class PhoneControllerServer(QObject):
         session = self.sessions[target_pid]
         if session.connected and session.socket is not None and session.socket != socket:
             log.warning("SESSION REJECTED reason=Slot occupied player=%d session=%s client=%s", target_pid, masked, client_ip)
+            dbg.log("PHONE_SERVER", "SESSION_AUTH_FAILED", connection_id=conn_id, player=target_pid, reason="player_slot_unavailable", client_ip=client_ip, level="WARN")
             self.session_rejected.emit(client_ip, f"Player {target_pid} slot occupied")
             reject_msg = json.dumps({
                 "version": 1,
@@ -439,6 +494,7 @@ class PhoneControllerServer(QObject):
             return None
 
         log.info("SESSION VALID player=%d session=%s client=%s", target_pid, masked, client_ip)
+        dbg.log("PHONE_SERVER", "SESSION_AUTH_SUCCESS", connection_id=conn_id, player=target_pid, client_ip=client_ip)
         session.socket = socket
         session.connected = True
         session.client_ip = client_ip
@@ -451,15 +507,29 @@ class PhoneControllerServer(QObject):
         self._neutralize_player(target_pid, "Socket authenticated reset")
         log.info("PLAYER SESSION CONNECTED player=%d client=%s", target_pid, client_ip)
         log.info("PHONE_CONNECTED_SIGNAL player=%d client=%s", target_pid, client_ip)
+        dbg.log("PHONE_SERVER", "PLAYER_SESSION_CONNECTED", player=target_pid, connection_id=conn_id, client_ip=client_ip)
+        dbg.log("PHONE_SERVER", "PHONE_CONNECTED_SIGNAL", player=target_pid, connection_id=conn_id, client_ip=client_ip)
+        dbg.update_pipeline_stage(target_pid, "session", True, client_ip)
+        dbg.update_pipeline_stage(target_pid, "ws", True, client_ip)
         self.phone_connected.emit(target_pid, client_ip)
         return target_pid
 
     def _on_socket_disconnected(self, socket: QWebSocket) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        conn_id = _get_socket_conn_id(socket)
+
         pid = self._socket_map.pop(socket, None)
         if pid is not None:
             session = self.sessions.get(pid)
             if session and session.socket == socket:
                 log.info("Player %d disconnected", pid)
+                dbg.log("PHONE_SERVER", "WS_DISCONNECTED", connection_id=conn_id, player=pid, client_ip=session.client_ip, reason="client_closed")
+                dbg.log("PHONE_SERVER", "PLAYER_SESSION_DISCONNECTED", player=pid, connection_id=conn_id, reason="socket_disconnected")
+                dbg.update_pipeline_stage(pid, "ws", False)
+                dbg.update_pipeline_stage(pid, "session", False)
+                dbg.update_pipeline_stage(pid, "handshake", False)
+                dbg.update_pipeline_stage(pid, "ui", False)
                 session.socket = None
                 session.connected = False
                 self._neutralize_player(pid, "Phone disconnected")
@@ -490,8 +560,12 @@ class PhoneControllerServer(QObject):
         ts = time.time()
         session.last_packet_time = ts
 
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        PhoneDebugLogger.get_instance().log_control_packet(pid, steering, throttle, brake, flags)
+
         if emergency_stop:
             log.warning("Received Emergency Stop signal from Player %d phone binary packet", pid)
+            PhoneDebugLogger.get_instance().log("PHONE_SERVER", "EMERGENCY_STOP_RECEIVED", player=pid, level="WARN")
             self._neutralize_all("Phone Emergency Stop")
             parent_obj = self.parent()
             if parent_obj is not None and hasattr(parent_obj, "emergency_stop"):

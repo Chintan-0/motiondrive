@@ -208,6 +208,41 @@ class PhoneQRDialog(QDialog):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # Connection Debug Toolbar Row
+        debug_row = QHBoxLayout()
+        debug_row.setSpacing(8)
+
+        self.test_net_btn = QPushButton("RUN NETWORK TEST")
+        self.test_net_btn.setFixedHeight(24)
+        self.test_net_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #8b949e; font-size: 10px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 0 8px; } QPushButton:hover { color: #58a6ff; border-color: #1f6feb; }"
+        )
+        self.test_net_btn.clicked.connect(self._run_network_test)
+
+        self.copy_dbg_btn = QPushButton("COPY DEBUG INFO")
+        self.copy_dbg_btn.setFixedHeight(24)
+        self.copy_dbg_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #8b949e; font-size: 10px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 0 8px; } QPushButton:hover { color: #58a6ff; border-color: #1f6feb; }"
+        )
+        self.copy_dbg_btn.clicked.connect(self._copy_debug_info)
+
+        self.clear_dbg_btn = QPushButton("CLEAR LOG")
+        self.clear_dbg_btn.setFixedHeight(24)
+        self.clear_dbg_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #8b949e; font-size: 10px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 0 8px; } QPushButton:hover { color: #f85149; border-color: #da3633; }"
+        )
+        self.clear_dbg_btn.clicked.connect(self._clear_debug_log)
+
+        debug_row.addStretch()
+        debug_row.addWidget(self.test_net_btn)
+        debug_row.addWidget(self.copy_dbg_btn)
+        debug_row.addWidget(self.clear_dbg_btn)
+        debug_row.addStretch()
+        layout.addLayout(debug_row)
+
         # Wire server signals
         self.phone_server.phone_connected.connect(self._on_phone_connected)
         self.phone_server.phone_disconnected.connect(self._on_phone_disconnected)
@@ -377,6 +412,12 @@ class PhoneQRDialog(QDialog):
 
     def _on_phone_connected(self, player_id: int, ip: str) -> None:
         log.info("PHONE STATUS UPDATE player=%d status=CONNECTED (client=%s)", player_id, ip)
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        dbg.log("PHONE_DIALOG", "PHONE_DIALOG_CONNECTED", player=player_id, client_ip=ip)
+        dbg.log("PHONE_DIALOG", "PHONE_UI_STATE", player=player_id, state="CONNECTED")
+        dbg.update_pipeline_stage(player_id, "ui", True, ip)
+
         self._hint_timer.stop()
         self.troubleshoot_label.setVisible(False)
         self._update_status_badges()
@@ -384,8 +425,42 @@ class PhoneQRDialog(QDialog):
 
     def _on_phone_disconnected(self, player_id: int) -> None:
         log.info("PHONE STATUS UPDATE player=%d status=DISCONNECTED", player_id)
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        dbg.log("PHONE_DIALOG", "PHONE_UI_STATE", player=player_id, state="DISCONNECTED")
+        dbg.update_pipeline_stage(player_id, "ui", False)
+
         self._update_status_badges()
         self._update_start_button()
+
+    def _run_network_test(self) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        res = dbg.run_local_network_test(self.phone_server.HTTP_PORT, self.phone_server.active_ws_port)
+        details_str = " | ".join(res.get("details", []))
+        self.troubleshoot_label.setText(f"<b>NETWORK SELF-TEST:</b> {details_str}")
+        self.troubleshoot_label.setVisible(True)
+
+    def _copy_debug_info(self) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        report = dbg.get_sanitized_report(mode=self.player_mode, http_port=self.phone_server.HTTP_PORT, ws_port=self.phone_server.active_ws_port)
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(report)
+        self.copy_dbg_btn.setText("COPIED ✓")
+        QTimer.singleShot(2000, self._reset_debug_buttons)
+
+    def _clear_debug_log(self) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        dbg.clear_log()
+        self.troubleshoot_label.setText("<b>Debug Log Cleared.</b> Ready for fresh connection test.")
+        self.troubleshoot_label.setVisible(True)
+
+    def _reset_debug_buttons(self) -> None:
+        if hasattr(self, "copy_dbg_btn") and self.copy_dbg_btn is not None:
+            self.copy_dbg_btn.setText("COPY DEBUG INFO")
 
     def showEvent(self, event):
         super().showEvent(event)
