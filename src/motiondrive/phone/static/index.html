@@ -40,6 +40,11 @@
       </div>
 
       <div class="header-right">
+        <!-- Connection Debug Toggle Button -->
+        <button id="btn-toggle-debug" class="debug-toggle-btn" type="button" title="Connection Debug">
+          🐞 DEBUG
+        </button>
+
         <!-- Emergency Stop Button -->
         <button id="btn-emergency-stop" class="emergency-stop-btn" type="button" title="Emergency Stop Inputs">
           ⏹ STOP
@@ -191,6 +196,32 @@
         <button id="fallback-manual-btn" class="fallback-btn" type="button">SWITCH TO MANUAL</button>
       </div>
     </main>
+  </div>
+
+  <!-- Connection Debug Panel -->
+  <div id="connection-debug-panel" class="debug-panel hidden">
+    <div class="debug-panel-header">
+      <span class="debug-panel-title">CONNECTION DEBUG</span>
+      <div class="debug-panel-actions">
+        <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank">TEST :8766</a>
+        <button id="btn-close-debug" class="debug-close-btn" type="button">✕</button>
+      </div>
+    </div>
+    <div class="debug-panel-body">
+      <div class="debug-line"><span class="dl-label">HTTP:</span> <span id="dbg-http" class="dl-val text-green">● OK</span></div>
+      <div class="debug-line"><span class="dl-label">WebSocket:</span> <span id="dbg-ws" class="dl-val text-yellow">○ CONNECTING</span></div>
+      <div class="debug-line"><span class="dl-label">Target:</span> <span id="dbg-target" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">HTTP Host:</span> <span id="dbg-http-host" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">HTTP Port:</span> <span id="dbg-http-port" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">WS Host:</span> <span id="dbg-ws-host" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">WS Port:</span> <span id="dbg-ws-port" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Player:</span> <span id="dbg-player" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Session:</span> <span id="dbg-session" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Last Event:</span> <span id="dbg-last-event" class="dl-val">CONNECT_START</span></div>
+      <div class="debug-line"><span class="dl-label">Error:</span> <span id="dbg-error" class="dl-val">none</span></div>
+      <div class="debug-line"><span class="dl-label">Close Code:</span> <span id="dbg-close-code" class="dl-val">none</span></div>
+      <div class="debug-line"><span class="dl-label">Close Reason:</span> <span id="dbg-close-reason" class="dl-val">none</span></div>
+    </div>
   </div>
 
   <script src="app.js"></script>

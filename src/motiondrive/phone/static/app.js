@@ -83,6 +83,42 @@
   const gyroAlertBanner = document.getElementById('gyro-alert-banner');
   const btnFallbackManual = document.getElementById('fallback-manual-btn');
 
+  // DOM Elements - Connection Debug Panel
+  const debugPanel = document.getElementById('connection-debug-panel');
+  const btnToggleDebug = document.getElementById('btn-toggle-debug');
+  const btnCloseDebug = document.getElementById('btn-close-debug');
+  const dbgHttpStatus = document.getElementById('dbg-http');
+  const dbgWsStatus = document.getElementById('dbg-ws');
+  const dbgTarget = document.getElementById('dbg-target');
+  const dbgHttpHost = document.getElementById('dbg-http-host');
+  const dbgHttpPort = document.getElementById('dbg-http-port');
+  const dbgWsHost = document.getElementById('dbg-ws-host');
+  const dbgWsPort = document.getElementById('dbg-ws-port');
+  const dbgPlayer = document.getElementById('dbg-player');
+  const dbgSession = document.getElementById('dbg-session');
+  const dbgLastEvent = document.getElementById('dbg-last-event');
+  const dbgError = document.getElementById('dbg-error');
+  const dbgCloseCode = document.getElementById('dbg-close-code');
+  const dbgCloseReason = document.getElementById('dbg-close-reason');
+  const dbgRawTestLink = document.getElementById('dbg-raw-test-link');
+
+  function toggleDebugPanel(show) {
+    if (!debugPanel) return;
+    if (typeof show === 'boolean') {
+      if (show) debugPanel.classList.remove('hidden');
+      else debugPanel.classList.add('hidden');
+    } else {
+      debugPanel.classList.toggle('hidden');
+    }
+  }
+
+  if (btnToggleDebug) btnToggleDebug.addEventListener('click', () => toggleDebugPanel());
+  if (btnCloseDebug) btnCloseDebug.addEventListener('click', () => toggleDebugPanel(false));
+  if (badgeEl) badgeEl.addEventListener('click', () => toggleDebugPanel());
+  if (params.get('debug') === '1') {
+    toggleDebugPanel(true);
+  }
+
   // Edge-Triggered Haptic Feedback Helper
   function triggerHaptic(durationMs) {
     try {
@@ -495,23 +531,49 @@
     }
   }
 
+  let handshakeAckTimer = null;
+
+  function logDebugEvent(evtName, kv = {}) {
+    const kvStr = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join(' ');
+    console.log(`[MotionDrive] ${evtName} ${kvStr}`.trim());
+    if (dbgLastEvent) dbgLastEvent.textContent = evtName;
+  }
+
   function connect() {
     if (isStoppedByUser) return;
     setStatus('connecting', 'CONNECTING...');
 
+    const httpHost = window.location.hostname || '127.0.0.1';
+    const httpPort = window.location.port || '8765';
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsPortParam = parseInt(params.get('ws_port'), 10);
     const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
-    const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`;
+    const wsHost = httpHost;
+    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
 
-    console.log(`[MotionDrive] Connecting to WebSocket: ${wsUrl} (player=${playerParam})`);
+    // Populate Debug Panel values
+    if (dbgTarget) dbgTarget.textContent = wsUrl;
+    if (dbgHttpHost) dbgHttpHost.textContent = httpHost;
+    if (dbgHttpPort) dbgHttpPort.textContent = String(httpPort);
+    if (dbgWsHost) dbgWsHost.textContent = wsHost;
+    if (dbgWsPort) dbgWsPort.textContent = String(wsPort);
+    if (dbgPlayer) dbgPlayer.textContent = String(playerParam);
+    if (dbgSession) dbgSession.textContent = `session_present=${Boolean(sessionToken)} (prefix=${sessionToken ? sessionToken.slice(0, 7) : 'none'})`;
+    if (dbgRawTestLink) dbgRawTestLink.href = `/ws-test${window.location.search}`;
+
+    if (dbgWsStatus) {
+      dbgWsStatus.className = 'dl-val text-yellow';
+      dbgWsStatus.textContent = '○ CONNECTING';
+    }
+
+    logDebugEvent('WS_CONNECT_START', { url: wsUrl });
 
     try {
       ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        // Socket is open, but pending server session authentication
+        // Socket is open, pending server session authentication
         wheelTouchId = null;
         brakeTouchId = null;
         gasTouchId = null;
@@ -526,13 +588,33 @@
           playerBadgeEl.className = `player-tag p${playerParam === 2 ? 2 : 1}`;
         }
 
-        console.log(`[MotionDrive] WebSocket OPEN to ${wsUrl}. Sending AUTH/SUBSCRIBE for player ${playerParam}...`);
+        logDebugEvent('WS_OPEN', { url: wsUrl });
+        if (dbgWsStatus) {
+          dbgWsStatus.className = 'dl-val text-yellow';
+          dbgWsStatus.textContent = '○ AUTHENTICATING';
+        }
+        if (dbgError) dbgError.textContent = 'none';
+
+        logDebugEvent('HANDSHAKE_SEND', {
+          player: playerParam,
+          session_present: Boolean(sessionToken),
+          session_prefix: sessionToken ? sessionToken.slice(0, 7) : 'none'
+        });
+
         ws.send(JSON.stringify({
           version: 1,
           type: 'handshake',
           session: sessionToken,
           player: playerParam
         }));
+
+        if (handshakeAckTimer) clearTimeout(handshakeAckTimer);
+        handshakeAckTimer = setTimeout(() => {
+          if (!isConnected) {
+            logDebugEvent('HANDSHAKE_ACK_TIMEOUT', { player: playerParam });
+            if (dbgError) dbgError.textContent = 'Server handshake ACK timeout (5s)';
+          }
+        }, 5000);
       };
 
       ws.onmessage = (e) => {
@@ -550,14 +632,27 @@
 
           const data = JSON.parse(e.data);
           if (data.type === 'handshake_ack' && data.authenticated) {
+            if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
             isConnected = true;
-            console.log(`[MotionDrive] Session authenticated successfully for Player ${data.player || playerParam}`);
+            logDebugEvent('HANDSHAKE_ACK_RECEIVED', { player: data.player || playerParam });
+            if (dbgWsStatus) {
+              dbgWsStatus.className = 'dl-val text-green';
+              dbgWsStatus.textContent = '● CONNECTED';
+            }
+            if (dbgError) dbgError.textContent = 'none';
             setStatus('connected', 'CONNECTED ✓');
           } else if (data.type === 'rejected') {
-            console.warn('[MotionDrive] Session rejected by server:', data.message);
+            if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
+            logDebugEvent('SESSION_REJECTED', { message: data.message || 'unknown' });
             isStoppedByUser = true; // Prevent infinite reconnect loop on invalid session token
             isConnected = false;
+            if (dbgWsStatus) {
+              dbgWsStatus.className = 'dl-val text-red';
+              dbgWsStatus.textContent = '✕ REJECTED';
+            }
+            if (dbgError) dbgError.textContent = data.message || 'Session rejected';
             setStatus('error', 'SESSION REJECTED');
+            toggleDebugPanel(true);
             alert(data.message || 'Connection rejected by MotionDrive.');
             ws.close();
           } else if (data.type === 'ack' && data.ts) {
@@ -573,9 +668,22 @@
         } catch (err) {}
       };
 
-      ws.onclose = () => {
-        console.log('[MotionDrive] WebSocket closed.');
+      ws.onclose = (e) => {
+        if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
+        const reasonStr = e.reason || (e.wasClean ? 'Normal closure' : 'Abnormal closure (check firewall/timeout)');
+        logDebugEvent('WS_CLOSE', {
+          code: e.code,
+          reason: reasonStr,
+          was_clean: e.wasClean
+        });
         isConnected = false;
+        if (dbgWsStatus && dbgWsStatus.textContent !== '● CONNECTED') {
+          dbgWsStatus.className = 'dl-val text-red';
+          dbgWsStatus.textContent = '✕ FAILED';
+        }
+        if (dbgCloseCode) dbgCloseCode.textContent = String(e.code || 'none');
+        if (dbgCloseReason) dbgCloseReason.textContent = reasonStr;
+
         neutralizeAll();
         triggerHaptic(60);
         releaseWakeLock();
@@ -586,13 +694,28 @@
       };
 
       ws.onerror = (err) => {
-        console.error('[MotionDrive] WebSocket connection error:', err);
+        const errMsg = (err && (err.message || err.type)) ? (err.message || err.type) : 'Browser network error / connection refused';
+        logDebugEvent('WS_ERROR', { error: errMsg });
         isConnected = false;
+        if (dbgWsStatus) {
+          dbgWsStatus.className = 'dl-val text-red';
+          dbgWsStatus.textContent = '✕ FAILED';
+        }
+        if (dbgError) dbgError.textContent = errMsg;
         setStatus('error', 'CONNECTION ERROR');
+        // Make debug panel visible on failure so physical tester sees the exact target & error
+        toggleDebugPanel(true);
       };
     } catch (err) {
-      console.error('[MotionDrive] WebSocket initialization exception:', err);
+      const errMsg = err.message || String(err);
+      logDebugEvent('WS_EXCEPTION', { error: errMsg });
+      if (dbgWsStatus) {
+        dbgWsStatus.className = 'dl-val text-red';
+        dbgWsStatus.textContent = '✕ FAILED';
+      }
+      if (dbgError) dbgError.textContent = errMsg;
       setStatus('error', 'CONNECTION FAILED');
+      toggleDebugPanel(true);
       if (!isStoppedByUser) {
         setTimeout(connect, 3000);
       }

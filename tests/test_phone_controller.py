@@ -751,6 +751,104 @@ def test_debug_logger_local_network_test(qapp):
         qapp.processEvents()
 
 
+def test_ws_url_computation_logic():
+    """Validates the client-side WebSocket URL construction rules."""
+    def compute_ws_url(location_protocol, location_hostname, ws_port_param=None):
+        protocol = "wss:" if location_protocol == "https:" else "ws:"
+        port = int(ws_port_param) if ws_port_param and int(ws_port_param) > 0 else 8766
+        # Must strictly preserve location hostname without rewriting to localhost or 0.0.0.0
+        return f"{protocol}//{location_hostname}:{port}"
+
+    # 1. Reuses HTTP LAN host and default port 8766
+    url1 = compute_ws_url("http:", "10.197.139.93")
+    assert url1 == "ws://10.197.139.93:8766"
+    assert "localhost" not in url1
+    assert "127.0.0.1" not in url1
+    assert "0.0.0.0" not in url1
+
+    # 2. Honors custom ws_port parameter
+    url2 = compute_ws_url("http:", "192.168.1.50", "8767")
+    assert url2 == "ws://192.168.1.50:8767"
+
+    # 3. Uses wss: scheme if loaded over https:
+    url3 = compute_ws_url("https:", "10.197.139.93")
+    assert url3 == "wss://10.197.139.93:8766"
+
+
+def test_ws_test_http_endpoint(qapp):
+    """Verifies that the /ws-test endpoint is served over HTTP."""
+    import urllib.request
+    server = PhoneControllerServer()
+    assert server.start() is True
+
+    try:
+        url = f"http://127.0.0.1:{server.HTTP_PORT}/ws-test"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            assert resp.status == 200
+            content = resp.read().decode("utf-8")
+            assert "MOTIONDRIVE WEBSOCKET TEST" in content
+            assert "TEST WEBSOCKET" in content
+            assert "ws-target-display" in content
+    finally:
+        server.stop()
+        qapp.processEvents()
+
+
+def test_server_raw_websocket_test_probe(qapp):
+    """Verifies that raw WebSocket connections sending ws_test receive ws_test_ack without session auth."""
+    from PySide6.QtWebSockets import QWebSocket
+    from motiondrive.phone.debug_logger import PhoneDebugLogger
+    dbg = PhoneDebugLogger.get_instance()
+    dbg.clear_log()
+
+    server = PhoneControllerServer()
+    assert server.start() is True
+
+    received_ack = []
+    ws_client = QWebSocket()
+
+    def on_text(msg):
+        try:
+            data = json.loads(msg)
+            if data.get("type") == "ws_test_ack":
+                received_ack.append(data)
+        except Exception:
+            pass
+
+    ws_client.textMessageReceived.connect(on_text)
+
+    def on_connected():
+        ws_client.sendTextMessage(json.dumps({"type": "ws_test"}))
+
+    ws_client.connected.connect(on_connected)
+
+    try:
+        ws_client.open(f"ws://127.0.0.1:{server.active_ws_port}")
+
+        # Wait up to 3s for connection and ack
+        start = time.time()
+        while len(received_ack) == 0 and time.time() - start < 3.0:
+            qapp.processEvents()
+            time.sleep(0.02)
+
+        assert len(received_ack) == 1
+        assert received_ack[0]["status"] == "ok"
+
+        # Check debug logger events
+        event_names = [e["event"] for e in dbg.events]
+        assert "WS_TCP_CONNECTED" in event_names
+        assert "WS_CONNECTION_ACCEPTED" in event_names
+        assert "WS_TEST_CONNECTED" in event_names
+
+    finally:
+        ws_client.close()
+        qapp.processEvents()
+        server.stop()
+        qapp.processEvents()
+
+
+
 
 
 

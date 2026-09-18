@@ -176,6 +176,7 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
         client_ip = self.client_address[0] if hasattr(self, "client_address") else "unknown"
         log.info("PHONE_HTTP_REQUEST client_ip=%s path=%s", client_ip, self.path)
         clean_path = self.path.split("?")[0].rstrip("/")
+
         if clean_path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -186,6 +187,33 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
             log.info("PHONE_HTTP_HEALTH_OK client_ip=%s", client_ip)
             return
+
+        if clean_path in ("/ws-test", "/ws-test.html"):
+            ws_test_path = get_static_dir() / "ws_test.html"
+            if ws_test_path.exists():
+                content = ws_test_path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                log.info("PHONE_HTTP_WS_TEST_SERVED client_ip=%s", client_ip)
+                return
+
+        # Track HTTP reachability for player session
+        if clean_path in ("", "/", "/index.html"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                qs = parse_qs(parsed.query)
+                player_val = int(qs.get("player", ["1"])[0])
+                from motiondrive.phone.debug_logger import PhoneDebugLogger
+                dbg = PhoneDebugLogger.get_instance()
+                dbg.update_pipeline_stage(player_val, "http", True, client_ip)
+                dbg.log("PHONE_SERVER", "HTTP_REQUEST_RECEIVED", player=player_val, client_ip=client_ip, path=clean_path)
+            except Exception:
+                pass
+
         super().do_GET()
 
     def log_message(self, format, *args):
@@ -445,6 +473,8 @@ class PhoneControllerServer(QObject):
         socket.disconnected.connect(lambda s=socket: self._on_socket_disconnected(s))
         log.info("WS_TCP_CONNECTED client_ip=%s port=%d connection_id=%s", client_ip, port, conn_id)
         dbg.log("PHONE_SERVER", "WS_TCP_CONNECTED", connection_id=conn_id, client_ip=client_ip, client_port=port)
+        log.info("WS_CONNECTION_ACCEPTED connection_id=%s client_ip=%s", conn_id, client_ip)
+        dbg.log("PHONE_SERVER", "WS_CONNECTION_ACCEPTED", connection_id=conn_id, client_ip=client_ip)
 
     def _authenticate_socket(self, socket: QWebSocket, token: str) -> int | None:
         from motiondrive.phone.debug_logger import PhoneDebugLogger
@@ -527,6 +557,20 @@ class PhoneControllerServer(QObject):
         dbg = PhoneDebugLogger.get_instance()
         conn_id = _get_socket_conn_id(socket)
 
+        is_test = False
+        if hasattr(socket, "property") and callable(getattr(socket, "property")):
+            try:
+                is_test = bool(socket.property("is_ws_test"))
+            except Exception:
+                pass
+
+        if is_test:
+            client_ip = socket.peerAddress().toString() if hasattr(socket, "peerAddress") else "unknown"
+            code = socket.closeCode() if hasattr(socket, "closeCode") else 0
+            log.info("WS_TEST_DISCONNECTED client_ip=%s connection_id=%s code=%s", client_ip, conn_id, code)
+            dbg.log("PHONE_SERVER", "WS_TEST_DISCONNECTED", connection_id=conn_id, client_ip=client_ip, code=code)
+            return
+
         pid = self._socket_map.pop(socket, None)
         if pid is not None:
             session = self.sessions.get(pid)
@@ -601,7 +645,33 @@ class PhoneControllerServer(QObject):
         except Exception:
             return
 
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict):
+            return
+
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        conn_id = _get_socket_conn_id(socket)
+        msg_type = data.get("type", "")
+
+        # Handle diagnostic WebSocket test endpoint (/ws-test)
+        if msg_type == "ws_test":
+            if hasattr(socket, "setProperty") and callable(getattr(socket, "setProperty")):
+                socket.setProperty("is_ws_test", True)
+            client_ip = socket.peerAddress().toString() if hasattr(socket, "peerAddress") else "unknown"
+            log.info("WS_TEST_CONNECTED client_ip=%s connection_id=%s", client_ip, conn_id)
+            dbg.log("PHONE_SERVER", "WS_TEST_CONNECTED", connection_id=conn_id, client_ip=client_ip)
+            try:
+                socket.sendTextMessage(json.dumps({
+                    "version": 1,
+                    "type": "ws_test_ack",
+                    "status": "ok",
+                    "timestamp": time.time()
+                }))
+            except Exception:
+                pass
+            return
+
+        if data.get("version") != 1:
             return
 
         token = data.get("session", "")
@@ -613,9 +683,9 @@ class PhoneControllerServer(QObject):
                 return
 
         session = self.sessions[pid]
-        msg_type = data.get("type", "")
         if msg_type == "handshake":
             log.info("WS_HANDSHAKE_RECEIVED player=%d session=%s client_ip=%s", pid, mask_token(token), session.client_ip)
+            dbg.log("PHONE_SERVER", "WS_HANDSHAKE_RECEIVED", connection_id=conn_id, player=pid, session_present=bool(token), client_ip=session.client_ip)
             session.last_packet_time = time.time()
             ack_msg = json.dumps({
                 "version": 1,
@@ -625,7 +695,9 @@ class PhoneControllerServer(QObject):
             })
             try:
                 socket.sendTextMessage(ack_msg)
-                log.info("WS_HANDSHAKE_ACCEPTED player=%d client_ip=%s", pid, session.client_ip)
+                log.info("WS_HANDSHAKE_ACK_SENT player=%d client_ip=%s", pid, session.client_ip)
+                dbg.log("PHONE_SERVER", "WS_HANDSHAKE_ACK_SENT", connection_id=conn_id, player=pid, client_ip=session.client_ip)
+                dbg.update_pipeline_stage(pid, "handshake", True, session.client_ip)
             except Exception:
                 pass
             return
