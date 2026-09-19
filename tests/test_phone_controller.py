@@ -848,6 +848,92 @@ def test_server_raw_websocket_test_probe(qapp):
         qapp.processEvents()
 
 
+def test_client_log_endpoint_http(qapp):
+    import urllib.request
+    import urllib.parse
+    from motiondrive.phone.debug_logger import PhoneDebugLogger
+    dbg = PhoneDebugLogger.get_instance()
+    dbg.clear_log()
+
+    server = PhoneControllerServer()
+    assert server.start() is True
+
+    try:
+        # 1. Test GET /client-log
+        params = urllib.parse.urlencode({
+            "event": "WS_CONNECT_START",
+            "player": "1",
+            "details": "url=ws://10.0.0.1:8766"
+        })
+        url = f"http://127.0.0.1:{server.HTTP_PORT}/client-log?{params}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode())
+            assert data.get("status") == "ok"
+
+        # Check logger recorded the event
+        client_evts = [e for e in dbg.events if e.get("event") == "WS_CONNECT_START"]
+        assert len(client_evts) >= 1
+        assert client_evts[0]["kv"]["player"] == "1"
+
+        # 2. Test POST /client-log
+        post_data = json.dumps({
+            "event": "WS_ERROR",
+            "player": 2,
+            "details": "Refused / Firewall blocked"
+        }).encode("utf-8")
+        post_req = urllib.request.Request(
+            f"http://127.0.0.1:{server.HTTP_PORT}/client-log",
+            data=post_data,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(post_req, timeout=2.0) as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode())
+            assert data.get("status") == "ok"
+
+        err_evts = [e for e in dbg.events if e.get("event") == "WS_ERROR"]
+        assert len(err_evts) >= 1
+        assert err_evts[0]["kv"]["player"] == "2"
+
+    finally:
+        server.stop()
+        qapp.processEvents()
+
+
+def test_phone_debug_viewer_dialog(qapp):
+    from motiondrive.ui.phone_dialog import PhoneQRDialog, PhoneDebugViewerDialog
+    server = PhoneControllerServer()
+    server.start()
+
+    dialog = PhoneQRDialog(server)
+    dialog.show()
+    qapp.processEvents()
+
+    assert hasattr(dialog, "view_dbg_btn")
+    assert dialog.view_dbg_btn.text() == "VIEW DEBUG PANEL"
+
+    viewer = PhoneDebugViewerDialog(server, "single", dialog)
+    viewer.show()
+    qapp.processEvents()
+
+    content = viewer.text_edit.toPlainText()
+    assert "MotionDrive Phone Connection Debug Report" in content
+    assert "1. DESKTOP LOCAL SERVER STATUS:" in content
+    assert "2. WINDOWS DEFENDER FIREWALL:" in content
+
+    # Test copy report button
+    viewer._copy_report()
+    assert viewer.copy_btn.text() == "COPIED ✓"
+
+    viewer.close()
+    dialog.close()
+    server.stop()
+    qapp.processEvents()
+
+
+
 
 
 

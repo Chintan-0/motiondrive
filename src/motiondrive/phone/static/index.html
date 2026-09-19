@@ -203,11 +203,13 @@
     <div class="debug-panel-header">
       <span class="debug-panel-title">CONNECTION DEBUG</span>
       <div class="debug-panel-actions">
-        <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank">TEST :8766</a>
+        <button id="btn-run-raw-ws-test" class="debug-test-btn" type="button">TEST :8766</button>
+        <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank" title="Open full test page">EXT TEST</a>
         <button id="btn-close-debug" class="debug-close-btn" type="button">✕</button>
       </div>
     </div>
     <div class="debug-panel-body">
+      <div id="dbg-test-banner" class="debug-test-banner hidden"></div>
       <div class="debug-line"><span class="dl-label">HTTP:</span> <span id="dbg-http" class="dl-val text-green">● OK</span></div>
       <div class="debug-line"><span class="dl-label">WebSocket:</span> <span id="dbg-ws" class="dl-val text-yellow">○ CONNECTING</span></div>
       <div class="debug-line"><span class="dl-label">Target:</span> <span id="dbg-target" class="dl-val">...</span></div>
@@ -221,6 +223,13 @@
       <div class="debug-line"><span class="dl-label">Error:</span> <span id="dbg-error" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Code:</span> <span id="dbg-close-code" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Reason:</span> <span id="dbg-close-reason" class="dl-val">none</span></div>
+
+      <div class="debug-events-section">
+        <div class="debug-events-header">LIVE EVENT STREAM:</div>
+        <div id="dbg-events-stream" class="debug-events-stream">
+          <div class="debug-event-item">Initializing telemetry...</div>
+        </div>
+      </div>
     </div>
   </div>
 

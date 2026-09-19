@@ -5,7 +5,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QWidget, QLineEdit, QApplication)
+                               QPushButton, QWidget, QLineEdit, QApplication,
+                               QPlainTextEdit)
 
 from motiondrive.logging_ import get_logger
 from motiondrive.phone.server import PhoneControllerServer
@@ -212,13 +213,22 @@ class PhoneQRDialog(QDialog):
         debug_row = QHBoxLayout()
         debug_row.setSpacing(8)
 
-        self.test_net_btn = QPushButton("RUN NETWORK TEST")
+        self.test_net_btn = QPushButton("RUN LOCAL TEST")
         self.test_net_btn.setFixedHeight(24)
+        self.test_net_btn.setToolTip("Verifies desktop HTTP & WS server loopback ports only; does not verify physical phone reachability")
         self.test_net_btn.setStyleSheet(
             "QPushButton { background-color: #161b22; color: #8b949e; font-size: 10px; font-weight: 700; "
             "border: 1px solid #30363d; border-radius: 4px; padding: 0 8px; } QPushButton:hover { color: #58a6ff; border-color: #1f6feb; }"
         )
         self.test_net_btn.clicked.connect(self._run_network_test)
+
+        self.view_dbg_btn = QPushButton("VIEW DEBUG PANEL")
+        self.view_dbg_btn.setFixedHeight(24)
+        self.view_dbg_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #8b949e; font-size: 10px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 0 8px; } QPushButton:hover { color: #58a6ff; border-color: #1f6feb; }"
+        )
+        self.view_dbg_btn.clicked.connect(self._open_debug_panel)
 
         self.copy_dbg_btn = QPushButton("COPY DEBUG INFO")
         self.copy_dbg_btn.setFixedHeight(24)
@@ -238,6 +248,7 @@ class PhoneQRDialog(QDialog):
 
         debug_row.addStretch()
         debug_row.addWidget(self.test_net_btn)
+        debug_row.addWidget(self.view_dbg_btn)
         debug_row.addWidget(self.copy_dbg_btn)
         debug_row.addWidget(self.clear_dbg_btn)
         debug_row.addStretch()
@@ -438,8 +449,12 @@ class PhoneQRDialog(QDialog):
         dbg = PhoneDebugLogger.get_instance()
         res = dbg.run_local_network_test(self.phone_server.HTTP_PORT, self.phone_server.active_ws_port)
         details_str = " | ".join(res.get("details", []))
-        self.troubleshoot_label.setText(f"<b>NETWORK SELF-TEST:</b> {details_str}")
+        self.troubleshoot_label.setText(f"<b>DESKTOP LOCAL TEST:</b> {details_str}")
         self.troubleshoot_label.setVisible(True)
+
+    def _open_debug_panel(self) -> None:
+        viewer = PhoneDebugViewerDialog(self.phone_server, self.player_mode, self)
+        viewer.exec()
 
     def _copy_debug_info(self) -> None:
         from motiondrive.phone.debug_logger import PhoneDebugLogger
@@ -469,6 +484,115 @@ class PhoneQRDialog(QDialog):
 
     def closeEvent(self, event):
         self._hint_timer.stop()
+        super().closeEvent(event)
+
+
+class PhoneDebugViewerDialog(QDialog):
+    """Auto-refreshing real-time network and phone connection debug viewer."""
+
+    def __init__(self, phone_server: PhoneControllerServer, player_mode: str = "single", parent=None):
+        super().__init__(parent)
+        self.phone_server = phone_server
+        self.player_mode = player_mode
+
+        self.setWindowTitle("MotionDrive Phone Connection Debug Console")
+        self.resize(720, 540)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {COLOR_BG}; border: 2px solid #1c2330; border-radius: 12px; }}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        # Header
+        header = QLabel("PHONE CONTROLLER DEBUG CONSOLE")
+        header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 1.5px; color: #58a6ff;")
+        layout.addWidget(header)
+
+        sub = QLabel("Real-time pipeline diagnostics, Windows firewall status & physical phone telemetry")
+        sub.setStyleSheet(f"font-size: 11px; color: {COLOR_TEXT_DIM};")
+        layout.addWidget(sub)
+
+        # Text display
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setStyleSheet(
+            "QPlainTextEdit { background-color: #0b0e14; color: #7ee787; font-family: 'Consolas', 'Courier New', monospace; "
+            "font-size: 11px; line-height: 1.4; border: 1px solid #21262d; border-radius: 8px; padding: 10px; }"
+        )
+        layout.addWidget(self.text_edit, stretch=1)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self.copy_btn = QPushButton("COPY REPORT")
+        self.copy_btn.setFixedHeight(30)
+        self.copy_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #e6edf3; font-size: 11px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 6px; padding: 0 14px; } QPushButton:hover { color: #58a6ff; border-color: #1f6feb; }"
+        )
+        self.copy_btn.clicked.connect(self._copy_report)
+
+        self.clear_btn = QPushButton("CLEAR LOG")
+        self.clear_btn.setFixedHeight(30)
+        self.clear_btn.setStyleSheet(
+            "QPushButton { background-color: #161b22; color: #e6edf3; font-size: 11px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 6px; padding: 0 14px; } QPushButton:hover { color: #f85149; border-color: #da3633; }"
+        )
+        self.clear_btn.clicked.connect(self._clear_log)
+
+        self.close_btn = QPushButton("CLOSE")
+        self.close_btn.setFixedHeight(30)
+        self.close_btn.setStyleSheet(
+            "QPushButton { background-color: #21262d; color: #e6edf3; font-size: 11px; font-weight: 700; "
+            "border: 1px solid #30363d; border-radius: 6px; padding: 0 16px; } QPushButton:hover { background-color: #30363d; }"
+        )
+        self.close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(self.copy_btn)
+        btn_row.addWidget(self.clear_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self.close_btn)
+        layout.addLayout(btn_row)
+
+        # Auto-refresh timer
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._update_report)
+        self._refresh_timer.start(1000)
+
+        self._update_report()
+
+    def _update_report(self) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        dbg = PhoneDebugLogger.get_instance()
+        report = dbg.get_sanitized_report(
+            mode=self.player_mode,
+            http_port=self.phone_server.HTTP_PORT,
+            ws_port=self.phone_server.active_ws_port
+        )
+        scrollbar = self.text_edit.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= (scrollbar.maximum() - 4)
+        self.text_edit.setPlainText(report)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _copy_report(self) -> None:
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(self.text_edit.toPlainText())
+        self.copy_btn.setText("COPIED ✓")
+        QTimer.singleShot(2000, lambda: self.copy_btn.setText("COPY REPORT") if hasattr(self, "copy_btn") else None)
+
+    def _clear_log(self) -> None:
+        from motiondrive.phone.debug_logger import PhoneDebugLogger
+        PhoneDebugLogger.get_instance().clear_log()
+        self._update_report()
+
+    def closeEvent(self, event):
+        self._refresh_timer.stop()
         super().closeEvent(event)
 
 

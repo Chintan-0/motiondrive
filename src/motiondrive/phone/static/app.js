@@ -87,6 +87,9 @@
   const debugPanel = document.getElementById('connection-debug-panel');
   const btnToggleDebug = document.getElementById('btn-toggle-debug');
   const btnCloseDebug = document.getElementById('btn-close-debug');
+  const btnRunRawWsTest = document.getElementById('btn-run-raw-ws-test');
+  const dbgTestBanner = document.getElementById('dbg-test-banner');
+  const dbgEventsStream = document.getElementById('dbg-events-stream');
   const dbgHttpStatus = document.getElementById('dbg-http');
   const dbgWsStatus = document.getElementById('dbg-ws');
   const dbgTarget = document.getElementById('dbg-target');
@@ -112,9 +115,28 @@
     }
   }
 
-  if (btnToggleDebug) btnToggleDebug.addEventListener('click', () => toggleDebugPanel());
-  if (btnCloseDebug) btnCloseDebug.addEventListener('click', () => toggleDebugPanel(false));
-  if (badgeEl) badgeEl.addEventListener('click', () => toggleDebugPanel());
+  function onToggleDebug(e) {
+    if (e) e.preventDefault();
+    toggleDebugPanel();
+  }
+
+  function onCloseDebug(e) {
+    if (e) e.preventDefault();
+    toggleDebugPanel(false);
+  }
+
+  if (btnToggleDebug) {
+    btnToggleDebug.addEventListener('click', onToggleDebug);
+    btnToggleDebug.addEventListener('touchend', onToggleDebug);
+  }
+  if (btnCloseDebug) {
+    btnCloseDebug.addEventListener('click', onCloseDebug);
+    btnCloseDebug.addEventListener('touchend', onCloseDebug);
+  }
+  if (badgeEl) {
+    badgeEl.addEventListener('click', onToggleDebug);
+    badgeEl.addEventListener('touchend', onToggleDebug);
+  }
   if (params.get('debug') === '1') {
     toggleDebugPanel(true);
   }
@@ -532,11 +554,142 @@
   }
 
   let handshakeAckTimer = null;
+  const recentEvents = [];
 
   function logDebugEvent(evtName, kv = {}) {
     const kvStr = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join(' ');
     console.log(`[MotionDrive] ${evtName} ${kvStr}`.trim());
     if (dbgLastEvent) dbgLastEvent.textContent = evtName;
+
+    // Maintain recent event queue
+    const timeStr = new Date().toLocaleTimeString();
+    recentEvents.push({ time: timeStr, name: evtName, kv });
+    if (recentEvents.length > 20) recentEvents.shift();
+
+    if (dbgEventsStream) {
+      dbgEventsStream.innerHTML = recentEvents.map(e => {
+        let cssClass = 'evt-name';
+        if (e.name.includes('FAIL') || e.name.includes('ERROR') || e.name.includes('REJECT') || e.name.includes('TIMEOUT')) {
+          cssClass = 'evt-err';
+        } else if (e.name.includes('SUCCESS') || e.name.includes('ACK_REC') || e.name === 'WS_OPEN') {
+          cssClass = 'evt-succ';
+        }
+        const detailsStr = Object.entries(e.kv).map(([k, v]) => `${k}=${v}`).join(' ');
+        return `<div class="debug-event-item"><span class="evt-time">[${e.time}]</span> <span class="${cssClass}">${e.name}</span> <span class="evt-detail">${detailsStr}</span></div>`;
+      }).join('');
+      dbgEventsStream.scrollTop = dbgEventsStream.scrollHeight;
+    }
+
+    // Transmit to desktop server via working HTTP :8765 (/client-log)
+    try {
+      const qs = new URLSearchParams({
+        event: evtName,
+        player: String(playerParam),
+        details: kvStr
+      });
+      fetch(`/client-log?${qs.toString()}`, { mode: 'no-cors' }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // Inline Raw WebSocket Test on :8766
+  let rawTestWs = null;
+  function runInlineRawWsTest(e) {
+    if (e) e.preventDefault();
+    if (!dbgTestBanner) return;
+    dbgTestBanner.className = 'debug-test-banner testing';
+    dbgTestBanner.textContent = 'Connecting raw WS :8766...';
+    dbgTestBanner.classList.remove('hidden');
+
+    const httpHost = window.location.hostname || '127.0.0.1';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsPortParam = parseInt(params.get('ws_port'), 10);
+    const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
+    const rawUrl = `${wsProtocol}//${httpHost}:${wsPort}`;
+
+    logDebugEvent('RAW_WS_TEST_START', { url: rawUrl });
+
+    if (rawTestWs) {
+      try { rawTestWs.close(); } catch(_) {}
+      rawTestWs = null;
+    }
+
+    const startTime = Date.now();
+    let testCompleted = false;
+
+    try {
+      rawTestWs = new WebSocket(rawUrl);
+      const timeoutTimer = setTimeout(() => {
+        if (!testCompleted) {
+          testCompleted = true;
+          if (dbgTestBanner) {
+            dbgTestBanner.className = 'debug-test-banner fail';
+            dbgTestBanner.textContent = 'RAW WS :8766 TIMEOUT (5s)';
+          }
+          logDebugEvent('RAW_WS_TEST_FAIL', { reason: 'timeout' });
+          try { rawTestWs.close(); } catch(_) {}
+        }
+      }, 5000);
+
+      rawTestWs.onopen = () => {
+        logDebugEvent('RAW_WS_TEST_OPEN', { url: rawUrl });
+        rawTestWs.send(JSON.stringify({ version: 1, type: 'ws_test' }));
+      };
+
+      rawTestWs.onmessage = (msgEvt) => {
+        try {
+          const data = JSON.parse(msgEvt.data);
+          if (data.type === 'ws_test_ack') {
+            testCompleted = true;
+            clearTimeout(timeoutTimer);
+            const rtt = Date.now() - startTime;
+            if (dbgTestBanner) {
+              dbgTestBanner.className = 'debug-test-banner success';
+              dbgTestBanner.textContent = `RAW WS :8766 REACHABLE ✓ (RTT: ${rtt}ms)`;
+            }
+            logDebugEvent('RAW_WS_TEST_SUCCESS', { rtt_ms: rtt });
+            try { rawTestWs.close(); } catch(_) {}
+          }
+        } catch(_) {}
+      };
+
+      rawTestWs.onerror = (err) => {
+        if (!testCompleted) {
+          testCompleted = true;
+          clearTimeout(timeoutTimer);
+          const errMsg = (err && (err.message || err.type)) ? (err.message || err.type) : 'Refused / Firewall blocked';
+          if (dbgTestBanner) {
+            dbgTestBanner.className = 'debug-test-banner fail';
+            dbgTestBanner.textContent = `RAW WS :8766 FAILED: ${errMsg}`;
+          }
+          logDebugEvent('RAW_WS_TEST_FAIL', { error: errMsg });
+        }
+      };
+
+      rawTestWs.onclose = (closeEvt) => {
+        if (!testCompleted) {
+          testCompleted = true;
+          clearTimeout(timeoutTimer);
+          const reason = closeEvt.reason || (closeEvt.wasClean ? 'Clean close' : 'Closed unexpectedly');
+          if (dbgTestBanner) {
+            dbgTestBanner.className = 'debug-test-banner fail';
+            dbgTestBanner.textContent = `RAW WS :8766 CLOSED (code: ${closeEvt.code})`;
+          }
+          logDebugEvent('RAW_WS_TEST_CLOSED', { code: closeEvt.code, reason });
+        }
+      };
+    } catch (err) {
+      testCompleted = true;
+      if (dbgTestBanner) {
+        dbgTestBanner.className = 'debug-test-banner fail';
+        dbgTestBanner.textContent = `RAW WS EXCEPTION: ${err.message || err}`;
+      }
+      logDebugEvent('RAW_WS_TEST_EXCEPTION', { error: err.message || err });
+    }
+  }
+
+  if (btnRunRawWsTest) {
+    btnRunRawWsTest.addEventListener('click', runInlineRawWsTest);
+    btnRunRawWsTest.addEventListener('touchend', runInlineRawWsTest);
   }
 
   function connect() {

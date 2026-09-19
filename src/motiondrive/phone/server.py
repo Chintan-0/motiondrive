@@ -123,37 +123,6 @@ def get_local_ip() -> str:
     return final_ip
 
 
-def ensure_firewall_rules() -> bool:
-    """Helper to programmatically add narrow Windows Firewall rules for MotionDrive controller ports (TCP 8765, 8766)."""
-    import sys
-    if sys.platform != "win32":
-        return True
-    try:
-        import subprocess
-        exe_path = sys.executable if getattr(sys, "frozen", False) else ""
-        prog_arg = f'program="{exe_path}" ' if exe_path else ""
-
-        cmd_http = (
-            'netsh advfirewall firewall add rule name="MotionDrive Phone Controller HTTP" '
-            f'dir=in action=allow protocol=TCP localport=8765 {prog_arg}profile=private,public'
-        )
-        cmd_ws = (
-            'netsh advfirewall firewall add rule name="MotionDrive Phone Controller WebSocket" '
-            f'dir=in action=allow protocol=TCP localport=8766 {prog_arg}profile=private,public'
-        )
-        res1 = subprocess.run(cmd_http, shell=True, capture_output=True, text=True)
-        res2 = subprocess.run(cmd_ws, shell=True, capture_output=True, text=True)
-        if res1.returncode == 0 and res2.returncode == 0:
-            log.info("Windows Firewall rules 'MotionDrive Phone Controller HTTP/WebSocket' verified/added (TCP 8765, 8766)")
-            return True
-        else:
-            log.debug("Could not add firewall rules (non-fatal, requires elevation): %s %s", res1.stderr.strip(), res2.stderr.strip())
-            return False
-    except Exception as e:
-        log.debug("Firewall check skipped: %s", e)
-        return False
-
-
 def get_static_dir() -> Path:
     """Resolves the directory containing mobile controller static files."""
     static_dir = resource_path("src/motiondrive/phone/static")
@@ -200,6 +169,37 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
                 log.info("PHONE_HTTP_WS_TEST_SERVED client_ip=%s", client_ip)
                 return
 
+        if clean_path == "/client-log":
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                qs = parse_qs(parsed.query)
+                evt_name = qs.get("event", ["UNKNOWN"])[0]
+                player_id = int(qs.get("player", ["1"])[0])
+                details = qs.get("details", [""])[0]
+                extra = {}
+                for k, v in qs.items():
+                    if k not in ("event", "player", "details"):
+                        extra[k] = v[0] if v else ""
+                if details:
+                    extra["details"] = details
+
+                from motiondrive.phone.debug_logger import PhoneDebugLogger
+                dbg = PhoneDebugLogger.get_instance()
+                dbg.log("PHONE_CLIENT", evt_name, player=player_id, client_ip=client_ip, **extra)
+                log.info("PHONE_CLIENT_EVENT player=%d event=%s client_ip=%s extra=%s", player_id, evt_name, client_ip, extra)
+            except Exception as e:
+                log.warning("Failed to process client log event: %s", e)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            body = b'{"status":"ok"}'
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # Track HTTP reachability for player session
         if clean_path in ("", "/", "/index.html"):
             try:
@@ -213,6 +213,42 @@ class _StaticHTTPHandler(http.server.SimpleHTTPRequestHandler):
                 dbg.log("PHONE_SERVER", "HTTP_REQUEST_RECEIVED", player=player_val, client_ip=client_ip, path=clean_path)
             except Exception:
                 pass
+
+        super().do_GET()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_POST(self):
+        client_ip = self.client_address[0] if hasattr(self, "client_address") else "unknown"
+        clean_path = self.path.split("?")[0].rstrip("/")
+        if clean_path == "/client-log":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+                data = json.loads(body.decode("utf-8"))
+                evt_name = data.get("event", "UNKNOWN")
+                player_id = int(data.get("player", 1))
+                extra = {k: str(v) for k, v in data.items() if k not in ("event", "player")}
+                from motiondrive.phone.debug_logger import PhoneDebugLogger
+                dbg = PhoneDebugLogger.get_instance()
+                dbg.log("PHONE_CLIENT", evt_name, player=player_id, client_ip=client_ip, **extra)
+                log.info("PHONE_CLIENT_EVENT player=%d event=%s client_ip=%s extra=%s", player_id, evt_name, client_ip, extra)
+            except Exception as e:
+                log.warning("Failed to process POST client log: %s", e)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            body = b'{"status":"ok"}'
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         super().do_GET()
 
@@ -298,7 +334,6 @@ class PhoneControllerServer(QObject):
 
         self.local_ip = get_local_ip()
         dbg.pipeline_state["selected_ip"] = self.local_ip
-        ensure_firewall_rules()
 
         dbg.log("PHONE_SERVER", "PHONE_SERVER_START", http_bind=f"0.0.0.0:{self.HTTP_PORT}", ws_bind=f"0.0.0.0:{self.WS_PORT}", local_ip=self.local_ip)
 

@@ -19,10 +19,10 @@ _LOG_FILE = _LOG_DIR / "phone_connection_debug.log"
 
 
 def get_firewall_status() -> Dict[str, str]:
-    """Inspects Windows Firewall rules and Network Profile for MotionDrive ports."""
+    """Inspects Windows Firewall rules for MotionDrive ports via registry (zero subprocess execution)."""
     res = {
-        "network_profile": "Unknown",
-        "rule_present": "MISSING",
+        "network_profile": "Private, Public (Installer Configured)",
+        "rule_present": "NOT CONFIGURED",
         "http_8765": "UNKNOWN",
         "ws_8766": "UNKNOWN",
     }
@@ -34,36 +34,34 @@ def get_firewall_status() -> Dict[str, str]:
         return res
 
     try:
-        import subprocess
-        ps_cmd = "(Get-NetConnectionProfile | Select-Object -ExpandProperty NetworkCategory)"
-        proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=2)
-        if proc.returncode == 0 and proc.stdout.strip():
-            first_profile = proc.stdout.strip().splitlines()[0].strip()
-            res["network_profile"] = first_profile
+        import winreg
+        key_path = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ) as k:
+            num_values = winreg.QueryInfoKey(k)[1]
+            has_http = False
+            has_ws = False
+            for i in range(num_values):
+                try:
+                    _, val_data, _ = winreg.EnumValue(k, i)
+                    val_str = str(val_data)
+                    if "Action=Allow" in val_str and "Active=TRUE" in val_str:
+                        if "MotionDrive Phone Controller HTTP" in val_str or "LPort=8765" in val_str:
+                            has_http = True
+                        if "MotionDrive Phone Controller WebSocket" in val_str or "LPort=8766" in val_str:
+                            has_ws = True
+                except Exception:
+                    pass
 
-        proc_http = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Phone Controller HTTP"], capture_output=True, text=True, timeout=2)
-        proc_ws = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Phone Controller WebSocket"], capture_output=True, text=True, timeout=2)
-        proc_legacy = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=MotionDrive Controller Ports"], capture_output=True, text=True, timeout=2)
-
-        has_http = (proc_http.returncode == 0 and "Enabled:" in proc_http.stdout and "Yes" in proc_http.stdout)
-        has_ws = (proc_ws.returncode == 0 and "Enabled:" in proc_ws.stdout and "Yes" in proc_ws.stdout)
-        has_legacy = (proc_legacy.returncode == 0 and "Enabled:" in proc_legacy.stdout and "Yes" in proc_legacy.stdout)
-
-        if has_http or has_ws or has_legacy:
-            res["rule_present"] = "PRESENT"
-            res["http_8765"] = "ALLOW" if (has_http or has_legacy) else "UNKNOWN"
-            res["ws_8766"] = "ALLOW" if (has_ws or has_legacy) else "UNKNOWN"
-        else:
-            res["rule_present"] = "MISSING"
-            if res["network_profile"].lower() == "public":
-                res["http_8765"] = "BLOCK"
-                res["ws_8766"] = "BLOCK"
+            if has_http or has_ws:
+                res["rule_present"] = "PRESENT"
+                res["http_8765"] = "ALLOW (Private, Public)" if has_http else "UNKNOWN"
+                res["ws_8766"] = "ALLOW (Private, Public)" if has_ws else "UNKNOWN"
             else:
+                res["rule_present"] = "NOT CONFIGURED (Run Installer)"
                 res["http_8765"] = "UNKNOWN"
                 res["ws_8766"] = "UNKNOWN"
     except Exception:
         pass
-
     return res
 
 
@@ -210,23 +208,28 @@ class PhoneDebugLogger:
 
     def get_sanitized_report(self, mode: str = "single", http_port: int = 8765, ws_port: int = 8766) -> str:
         fw_info = get_firewall_status()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
             "MotionDrive Phone Connection Debug Report",
-            "------------------------------------------",
+            "==========================================",
+            f"Timestamp: {now_str}",
             f"Mode: {'Single Player' if mode == 'single' else 'Two Player'}",
-            f"Local IP: {self.pipeline_state.get('selected_ip', 'Unknown')}",
-            f"Network Interface: {self.pipeline_state.get('selected_iface', 'Unknown')}",
+            f"Host Local IP: {self.pipeline_state.get('selected_ip', 'Unknown')}",
+            f"Host Network Interface: {self.pipeline_state.get('selected_iface', 'Unknown')}",
             "",
-            "Server Status:",
-            f"  HTTP: {'● READY' if self.pipeline_state.get('http_ready') else '○ WAITING'} ({self.pipeline_state.get('http_bind', '0.0.0.0:8765')})",
-            f"  WebSocket: {'● READY' if self.pipeline_state.get('ws_ready') else '○ WAITING'} ({self.pipeline_state.get('ws_bind', '0.0.0.0:8766')})",
+            "1. DESKTOP LOCAL SERVER STATUS:",
+            f"   HTTP Server:    {'● LISTENING' if self.pipeline_state.get('http_ready') else '○ WAITING'} ({self.pipeline_state.get('http_bind', f'0.0.0.0:{http_port}')})",
+            f"   WebSocket:      {'● LISTENING' if self.pipeline_state.get('ws_ready') else '○ WAITING'} ({self.pipeline_state.get('ws_bind', f'0.0.0.0:{ws_port}')})",
             "",
-            "Firewall:",
-            f"  HTTP 8765: {fw_info['http_8765']}",
-            f"  WS 8766: {fw_info['ws_8766']}",
-            f"  Network Profile: {fw_info['network_profile']}",
-            f"  MotionDrive Rule: {fw_info['rule_present']}",
+            "2. WINDOWS DEFENDER FIREWALL:",
+            f"   HTTP 8765:      {fw_info['http_8765']}",
+            f"   WS 8766:        {fw_info['ws_8766']}",
+            f"   Network Profile:{fw_info['network_profile']}",
+            f"   Rule Present:   {fw_info['rule_present']}",
             "",
+            "3. THREE DISTINCT CONNECTION CHECKS:",
+            f"   [TEST 1] Desktop Local HTTP:      {'● PASS' if self.pipeline_state.get('http_ready') else '○ FAIL'}",
+            f"   [TEST 2] Desktop Local WebSocket: {'● PASS' if self.pipeline_state.get('ws_ready') else '○ FAIL'}",
         ]
 
         for pid in (1, 2):
@@ -234,22 +237,25 @@ class PhoneDebugLogger:
                 continue
             pdata = self.pipeline_state.get(f"p{pid}", {})
             lines.extend([
-                f"Player {pid} Pipeline:",
-                f"  Host IP: {self.pipeline_state.get('selected_ip', 'Unknown')}",
-                f"  Client IP: {pdata.get('ip', 'Not Connected')}",
-                f"  HTTP Request: {'● CONNECTED' if pdata.get('http') else '○ WAITING'}",
-                f"  WebSocket TCP: {'● CONNECTED' if pdata.get('ws') else '○ WAITING'}",
-                f"  Handshake ACK: {'● SUCCESS' if pdata.get('handshake') else '○ WAITING'}",
-                f"  Session Auth: {'● VALID' if pdata.get('session') else '○ WAITING'}",
-                f"  Desktop UI: {'● CONNECTED' if pdata.get('ui') else '○ WAITING'}",
+                f"   [TEST 3] Physical Phone P{pid} WS:  {'● CONNECTED' if pdata.get('ws') else '○ WAITING'}",
+                "",
+                f"4. PHYSICAL PHONE P{pid} PIPELINE:",
+                f"   Client IP:       {pdata.get('ip', 'Not Connected')}",
+                f"   HTTP Request:    {'● CONNECTED' if pdata.get('http') else '○ WAITING'}",
+                f"   WS TCP (Server): {'● CONNECTED' if pdata.get('ws') else '○ WAITING'}",
+                f"   Handshake ACK:   {'● SUCCESS' if pdata.get('handshake') else '○ WAITING'}",
+                f"   Session Auth:    {'● VALID' if pdata.get('session') else '○ WAITING'}",
+                f"   Desktop UI:      {'● CONNECTED' if pdata.get('ui') else '○ WAITING'}",
                 "",
             ])
 
-        lines.append("Recent Events (Last 15):")
+        lines.append("5. RECENT LIVE EVENT STREAM (Last 25):")
         with self._events_lock:
-            recent = self.events[-15:]
+            recent = self.events[-25:]
+            if not recent:
+                lines.append("   (No events logged yet)")
             for ev in recent:
-                lines.append(f"  {ev['raw']}")
+                lines.append(f"   {ev['raw']}")
 
         return "\n".join(lines)
 
@@ -277,11 +283,11 @@ class PhoneDebugLogger:
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 if resp.status == 200:
                     res["http"] = True
-                    res["details"].append(f"HTTP Server: PASS (port {http_port})")
+                    res["details"].append(f"HTTP Loopback: PASS (port {http_port})")
                 else:
-                    res["details"].append(f"HTTP Server: FAIL (status {resp.status})")
+                    res["details"].append(f"HTTP Loopback: FAIL (status {resp.status})")
         except Exception as e:
-            res["details"].append(f"HTTP Server: FAIL ({e})")
+            res["details"].append(f"HTTP Loopback: FAIL ({e})")
 
         # 3. WS TCP Port Probing
         try:
@@ -291,17 +297,19 @@ class PhoneDebugLogger:
             s.close()
             if err == 0:
                 res["ws"] = True
-                res["details"].append(f"WebSocket Server: PASS (port {ws_port})")
+                res["details"].append(f"WS Loopback: PASS (port {ws_port})")
             else:
-                res["details"].append(f"WebSocket Server: FAIL (port {ws_port} closed)")
+                res["details"].append(f"WS Loopback: FAIL (port {ws_port} closed)")
         except Exception as e:
-            res["details"].append(f"WebSocket Server: FAIL ({e})")
+            res["details"].append(f"WS Loopback: FAIL ({e})")
+
+        res["details"].append("NOTE: Loopback PASS verifies desktop server only; does NOT verify physical phone reachability")
 
         self.log(
             "SELF_TEST",
-            "LOCAL_NETWORK_TEST",
-            http="PASS" if res["http"] else "FAIL",
-            ws="PASS" if res["ws"] else "FAIL",
+            "DESKTOP_LOCAL_SERVER_TEST",
+            http_loopback="PASS" if res["http"] else "FAIL",
+            ws_loopback="PASS" if res["ws"] else "FAIL",
             ip="PASS" if res["ip_valid"] else "WARN",
         )
 
