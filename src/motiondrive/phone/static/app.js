@@ -88,22 +88,64 @@
   const btnToggleDebug = document.getElementById('btn-toggle-debug');
   const btnCloseDebug = document.getElementById('btn-close-debug');
   const btnRunRawWsTest = document.getElementById('btn-run-raw-ws-test');
-  const dbgTestBanner = document.getElementById('dbg-test-banner');
   const dbgEventsStream = document.getElementById('dbg-events-stream');
-  const dbgHttpStatus = document.getElementById('dbg-http');
-  const dbgWsStatus = document.getElementById('dbg-ws');
   const dbgTarget = document.getElementById('dbg-target');
+  const dbgClientState = document.getElementById('dbg-client-state');
+  const dbgLastEvent = document.getElementById('dbg-last-event');
   const dbgHttpHost = document.getElementById('dbg-http-host');
   const dbgHttpPort = document.getElementById('dbg-http-port');
-  const dbgWsHost = document.getElementById('dbg-ws-host');
   const dbgWsPort = document.getElementById('dbg-ws-port');
   const dbgPlayer = document.getElementById('dbg-player');
   const dbgSession = document.getElementById('dbg-session');
-  const dbgLastEvent = document.getElementById('dbg-last-event');
   const dbgError = document.getElementById('dbg-error');
   const dbgCloseCode = document.getElementById('dbg-close-code');
   const dbgCloseReason = document.getElementById('dbg-close-reason');
+  const dbgRawTarget = document.getElementById('dbg-raw-target');
+  const dbgRawState = document.getElementById('dbg-raw-state');
+  const dbgRawResult = document.getElementById('dbg-raw-result');
   const dbgRawTestLink = document.getElementById('dbg-raw-test-link');
+
+  // Network & WebSocket Target Configuration
+  const httpHost = window.location.hostname || '127.0.0.1';
+  const httpPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsPortRaw = params.get('ws_port');
+  const wsPortParam = parseInt(wsPortRaw, 10);
+  const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
+  const wsHost = httpHost;
+  const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+
+  // Client WebSocket State Tracker: NOT_STARTED | CONNECTING | OPEN | AUTHENTICATING | CONNECTED | REJECTED | ERROR | CLOSED
+  let clientWsState = 'NOT_STARTED';
+
+  function setClientWsState(state, colorClass = '') {
+    clientWsState = state;
+    if (dbgClientState) {
+      dbgClientState.textContent = state;
+      let cls = 'dl-val ';
+      if (colorClass) {
+        cls += colorClass;
+      } else if (state === 'CONNECTED' || state === 'OPEN') {
+        cls += 'text-green';
+      } else if (state === 'CONNECTING' || state === 'AUTHENTICATING' || state === 'NOT_STARTED') {
+        cls += 'text-yellow';
+      } else {
+        cls += 'text-red';
+      }
+      dbgClientState.className = cls;
+    }
+  }
+
+  // Pre-fill debug details
+  if (dbgTarget) dbgTarget.textContent = wsUrl;
+  if (dbgHttpHost) dbgHttpHost.textContent = httpHost;
+  if (dbgHttpPort) dbgHttpPort.textContent = String(httpPort);
+  if (dbgWsPort) dbgWsPort.textContent = wsPortRaw ? `${wsPort} (param)` : `${wsPort} (default 8766)`;
+  if (dbgPlayer) dbgPlayer.textContent = String(playerParam);
+  if (dbgSession) dbgSession.textContent = `present=${Boolean(sessionToken)} (prefix=${sessionToken ? sessionToken.slice(0, 7) : 'none'})`;
+  if (dbgRawTarget) dbgRawTarget.textContent = wsUrl;
+  if (dbgRawTestLink) dbgRawTestLink.href = `/ws-test${window.location.search}`;
+  setClientWsState('NOT_STARTED');
 
   function toggleDebugPanel(show) {
     if (!debugPanel) return;
@@ -591,22 +633,44 @@
     } catch (_) {}
   }
 
+  // Lifecycle Initialization Telemetry
+  logDebugEvent('MOBILE_APP_INIT', {
+    url: (window.location.href || '').slice(0, 120),
+    user_agent: (navigator.userAgent || '').slice(0, 60)
+  });
+
+  logDebugEvent('QUERY_PARSED', {
+    player: playerParam,
+    session_present: Boolean(sessionToken),
+    session_prefix: sessionToken ? sessionToken.slice(0, 7) : 'none',
+    raw_ws_port: wsPortRaw || 'none',
+    parsed_ws_port: wsPort
+  });
+
+  logDebugEvent('WS_CONFIG_READY', {
+    http_host: httpHost,
+    http_port: httpPort,
+    ws_host: wsHost,
+    ws_port: wsPort,
+    scheme: wsProtocol,
+    computed_url: wsUrl
+  });
+
   // Inline Raw WebSocket Test on :8766
   let rawTestWs = null;
   function runInlineRawWsTest(e) {
     if (e) e.preventDefault();
-    if (!dbgTestBanner) return;
-    dbgTestBanner.className = 'debug-test-banner testing';
-    dbgTestBanner.textContent = 'Connecting raw WS :8766...';
-    dbgTestBanner.classList.remove('hidden');
+    if (dbgRawTarget) dbgRawTarget.textContent = wsUrl;
+    if (dbgRawState) {
+      dbgRawState.textContent = 'CONNECTING...';
+      dbgRawState.className = 'dl-val text-yellow';
+    }
+    if (dbgRawResult) {
+      dbgRawResult.textContent = 'Attempting raw TCP connect...';
+      dbgRawResult.className = 'dl-val';
+    }
 
-    const httpHost = window.location.hostname || '127.0.0.1';
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsPortParam = parseInt(params.get('ws_port'), 10);
-    const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
-    const rawUrl = `${wsProtocol}//${httpHost}:${wsPort}`;
-
-    logDebugEvent('RAW_WS_TEST_START', { url: rawUrl });
+    logDebugEvent('RAW_WS_TEST_START', { url: wsUrl });
 
     if (rawTestWs) {
       try { rawTestWs.close(); } catch(_) {}
@@ -617,13 +681,17 @@
     let testCompleted = false;
 
     try {
-      rawTestWs = new WebSocket(rawUrl);
+      rawTestWs = new WebSocket(wsUrl);
       const timeoutTimer = setTimeout(() => {
         if (!testCompleted) {
           testCompleted = true;
-          if (dbgTestBanner) {
-            dbgTestBanner.className = 'debug-test-banner fail';
-            dbgTestBanner.textContent = 'RAW WS :8766 TIMEOUT (5s)';
+          if (dbgRawState) {
+            dbgRawState.textContent = 'TIMEOUT';
+            dbgRawState.className = 'dl-val text-red';
+          }
+          if (dbgRawResult) {
+            dbgRawResult.textContent = 'Timeout (5s) - port 8766 unreachable/blocked';
+            dbgRawResult.className = 'dl-val text-red';
           }
           logDebugEvent('RAW_WS_TEST_FAIL', { reason: 'timeout' });
           try { rawTestWs.close(); } catch(_) {}
@@ -631,7 +699,11 @@
       }, 5000);
 
       rawTestWs.onopen = () => {
-        logDebugEvent('RAW_WS_TEST_OPEN', { url: rawUrl });
+        if (dbgRawState) {
+          dbgRawState.textContent = 'OPEN (SENDING PING)';
+          dbgRawState.className = 'dl-val text-yellow';
+        }
+        logDebugEvent('RAW_WS_TEST_OPEN', { url: wsUrl });
         rawTestWs.send(JSON.stringify({ version: 1, type: 'ws_test' }));
       };
 
@@ -642,9 +714,13 @@
             testCompleted = true;
             clearTimeout(timeoutTimer);
             const rtt = Date.now() - startTime;
-            if (dbgTestBanner) {
-              dbgTestBanner.className = 'debug-test-banner success';
-              dbgTestBanner.textContent = `RAW WS :8766 REACHABLE ✓ (RTT: ${rtt}ms)`;
+            if (dbgRawState) {
+              dbgRawState.textContent = 'ACK RECEIVED ✓';
+              dbgRawState.className = 'dl-val text-green';
+            }
+            if (dbgRawResult) {
+              dbgRawResult.textContent = `REACHABLE ✓ (RTT: ${rtt}ms)`;
+              dbgRawResult.className = 'dl-val text-green';
             }
             logDebugEvent('RAW_WS_TEST_SUCCESS', { rtt_ms: rtt });
             try { rawTestWs.close(); } catch(_) {}
@@ -657,9 +733,13 @@
           testCompleted = true;
           clearTimeout(timeoutTimer);
           const errMsg = (err && (err.message || err.type)) ? (err.message || err.type) : 'Refused / Firewall blocked';
-          if (dbgTestBanner) {
-            dbgTestBanner.className = 'debug-test-banner fail';
-            dbgTestBanner.textContent = `RAW WS :8766 FAILED: ${errMsg}`;
+          if (dbgRawState) {
+            dbgRawState.textContent = 'ERROR';
+            dbgRawState.className = 'dl-val text-red';
+          }
+          if (dbgRawResult) {
+            dbgRawResult.textContent = `FAILED: ${errMsg}`;
+            dbgRawResult.className = 'dl-val text-red';
           }
           logDebugEvent('RAW_WS_TEST_FAIL', { error: errMsg });
         }
@@ -670,18 +750,26 @@
           testCompleted = true;
           clearTimeout(timeoutTimer);
           const reason = closeEvt.reason || (closeEvt.wasClean ? 'Clean close' : 'Closed unexpectedly');
-          if (dbgTestBanner) {
-            dbgTestBanner.className = 'debug-test-banner fail';
-            dbgTestBanner.textContent = `RAW WS :8766 CLOSED (code: ${closeEvt.code})`;
+          if (dbgRawState) {
+            dbgRawState.textContent = `CLOSED (${closeEvt.code})`;
+            dbgRawState.className = 'dl-val text-red';
+          }
+          if (dbgRawResult) {
+            dbgRawResult.textContent = reason;
+            dbgRawResult.className = 'dl-val text-red';
           }
           logDebugEvent('RAW_WS_TEST_CLOSED', { code: closeEvt.code, reason });
         }
       };
     } catch (err) {
       testCompleted = true;
-      if (dbgTestBanner) {
-        dbgTestBanner.className = 'debug-test-banner fail';
-        dbgTestBanner.textContent = `RAW WS EXCEPTION: ${err.message || err}`;
+      if (dbgRawState) {
+        dbgRawState.textContent = 'EXCEPTION';
+        dbgRawState.className = 'dl-val text-red';
+      }
+      if (dbgRawResult) {
+        dbgRawResult.textContent = err.message || String(err);
+        dbgRawResult.className = 'dl-val text-red';
       }
       logDebugEvent('RAW_WS_TEST_EXCEPTION', { error: err.message || err });
     }
@@ -695,31 +783,26 @@
   function connect() {
     if (isStoppedByUser) return;
     setStatus('connecting', 'CONNECTING...');
-
-    const httpHost = window.location.hostname || '127.0.0.1';
-    const httpPort = window.location.port || '8765';
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsPortParam = parseInt(params.get('ws_port'), 10);
-    const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
-    const wsHost = httpHost;
-    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+    setClientWsState('CONNECTING');
 
     // Populate Debug Panel values
     if (dbgTarget) dbgTarget.textContent = wsUrl;
     if (dbgHttpHost) dbgHttpHost.textContent = httpHost;
     if (dbgHttpPort) dbgHttpPort.textContent = String(httpPort);
-    if (dbgWsHost) dbgWsHost.textContent = wsHost;
-    if (dbgWsPort) dbgWsPort.textContent = String(wsPort);
+    if (dbgWsPort) dbgWsPort.textContent = wsPortRaw ? `${wsPort} (param)` : `${wsPort} (default 8766)`;
     if (dbgPlayer) dbgPlayer.textContent = String(playerParam);
-    if (dbgSession) dbgSession.textContent = `session_present=${Boolean(sessionToken)} (prefix=${sessionToken ? sessionToken.slice(0, 7) : 'none'})`;
+    if (dbgSession) dbgSession.textContent = `present=${Boolean(sessionToken)} (prefix=${sessionToken ? sessionToken.slice(0, 7) : 'none'})`;
+    if (dbgRawTarget) dbgRawTarget.textContent = wsUrl;
     if (dbgRawTestLink) dbgRawTestLink.href = `/ws-test${window.location.search}`;
 
-    if (dbgWsStatus) {
-      dbgWsStatus.className = 'dl-val text-yellow';
-      dbgWsStatus.textContent = '○ CONNECTING';
-    }
-
-    logDebugEvent('WS_CONNECT_START', { url: wsUrl });
+    logDebugEvent('WS_CONNECT_START', {
+      host: wsHost,
+      port: wsPort,
+      scheme: wsProtocol,
+      player: playerParam,
+      session_present: Boolean(sessionToken),
+      computed_url: wsUrl
+    });
 
     try {
       ws = new WebSocket(wsUrl);
@@ -732,6 +815,7 @@
         gasTouchId = null;
         shiftTouchId = null;
 
+        setClientWsState('OPEN');
         setStatus('connecting', 'AUTHENTICATING...');
         requestWakeLock();
 
@@ -742,10 +826,7 @@
         }
 
         logDebugEvent('WS_OPEN', { url: wsUrl });
-        if (dbgWsStatus) {
-          dbgWsStatus.className = 'dl-val text-yellow';
-          dbgWsStatus.textContent = '○ AUTHENTICATING';
-        }
+        setClientWsState('AUTHENTICATING');
         if (dbgError) dbgError.textContent = 'none';
 
         logDebugEvent('HANDSHAKE_SEND', {
@@ -787,11 +868,8 @@
           if (data.type === 'handshake_ack' && data.authenticated) {
             if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
             isConnected = true;
+            setClientWsState('CONNECTED');
             logDebugEvent('HANDSHAKE_ACK_RECEIVED', { player: data.player || playerParam });
-            if (dbgWsStatus) {
-              dbgWsStatus.className = 'dl-val text-green';
-              dbgWsStatus.textContent = '● CONNECTED';
-            }
             if (dbgError) dbgError.textContent = 'none';
             setStatus('connected', 'CONNECTED ✓');
           } else if (data.type === 'rejected') {
@@ -799,10 +877,7 @@
             logDebugEvent('SESSION_REJECTED', { message: data.message || 'unknown' });
             isStoppedByUser = true; // Prevent infinite reconnect loop on invalid session token
             isConnected = false;
-            if (dbgWsStatus) {
-              dbgWsStatus.className = 'dl-val text-red';
-              dbgWsStatus.textContent = '✕ REJECTED';
-            }
+            setClientWsState('REJECTED');
             if (dbgError) dbgError.textContent = data.message || 'Session rejected';
             setStatus('error', 'SESSION REJECTED');
             toggleDebugPanel(true);
@@ -811,6 +886,7 @@
           } else if (data.type === 'ack' && data.ts) {
             if (!isConnected) {
               isConnected = true;
+              setClientWsState('CONNECTED');
               setStatus('connected', 'CONNECTED ✓');
             }
             const nowSec = Date.now() / 1000.0;
@@ -824,16 +900,13 @@
       ws.onclose = (e) => {
         if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
         const reasonStr = e.reason || (e.wasClean ? 'Normal closure' : 'Abnormal closure (check firewall/timeout)');
+        setClientWsState('CLOSED');
         logDebugEvent('WS_CLOSE', {
           code: e.code,
           reason: reasonStr,
           was_clean: e.wasClean
         });
         isConnected = false;
-        if (dbgWsStatus && dbgWsStatus.textContent !== '● CONNECTED') {
-          dbgWsStatus.className = 'dl-val text-red';
-          dbgWsStatus.textContent = '✕ FAILED';
-        }
         if (dbgCloseCode) dbgCloseCode.textContent = String(e.code || 'none');
         if (dbgCloseReason) dbgCloseReason.textContent = reasonStr;
 
@@ -848,12 +921,9 @@
 
       ws.onerror = (err) => {
         const errMsg = (err && (err.message || err.type)) ? (err.message || err.type) : 'Browser network error / connection refused';
+        setClientWsState('ERROR');
         logDebugEvent('WS_ERROR', { error: errMsg });
         isConnected = false;
-        if (dbgWsStatus) {
-          dbgWsStatus.className = 'dl-val text-red';
-          dbgWsStatus.textContent = '✕ FAILED';
-        }
         if (dbgError) dbgError.textContent = errMsg;
         setStatus('error', 'CONNECTION ERROR');
         // Make debug panel visible on failure so physical tester sees the exact target & error
@@ -861,11 +931,8 @@
       };
     } catch (err) {
       const errMsg = err.message || String(err);
+      setClientWsState('ERROR');
       logDebugEvent('WS_EXCEPTION', { error: errMsg });
-      if (dbgWsStatus) {
-        dbgWsStatus.className = 'dl-val text-red';
-        dbgWsStatus.textContent = '✕ FAILED';
-      }
       if (dbgError) dbgError.textContent = errMsg;
       setStatus('error', 'CONNECTION FAILED');
       toggleDebugPanel(true);

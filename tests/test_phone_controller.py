@@ -933,6 +933,31 @@ def test_phone_debug_viewer_dialog(qapp):
     qapp.processEvents()
 
 
+def test_raw_websocket_diagnostic_endpoint(qapp):
+    server = PhoneControllerServer()
+    server.start()
+    try:
+        class RecordingDummySocket(DummySocket):
+            def __init__(self):
+                super().__init__()
+                self.sent_messages = []
+
+            def sendTextMessage(self, msg):
+                self.sent_messages.append(msg)
+
+        sock = RecordingDummySocket()
+        server._on_message_received(json.dumps({"version": 1, "type": "ws_test"}), sock)
+        assert len(sock.sent_messages) == 1
+        ack = json.loads(sock.sent_messages[0])
+        assert ack.get("type") == "ws_test_ack"
+        assert ack.get("status") == "ok"
+        assert "timestamp" in ack
+        assert sock.property("is_ws_test") is True
+    finally:
+        server.stop()
+        qapp.processEvents()
+
+
 
 
 

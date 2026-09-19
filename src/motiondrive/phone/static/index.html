@@ -201,31 +201,39 @@
   <!-- Connection Debug Panel -->
   <div id="connection-debug-panel" class="debug-panel hidden">
     <div class="debug-panel-header">
-      <span class="debug-panel-title">CONNECTION DEBUG</span>
+      <span class="debug-panel-title">CONNECTION CLIENT TRACE</span>
       <div class="debug-panel-actions">
-        <button id="btn-run-raw-ws-test" class="debug-test-btn" type="button">TEST :8766</button>
-        <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank" title="Open full test page">EXT TEST</a>
-        <button id="btn-close-debug" class="debug-close-btn" type="button">✕</button>
+        <button id="btn-close-debug" class="debug-close-btn" type="button" title="Close Debug Panel">✕</button>
       </div>
     </div>
     <div class="debug-panel-body">
-      <div id="dbg-test-banner" class="debug-test-banner hidden"></div>
-      <div class="debug-line"><span class="dl-label">HTTP:</span> <span id="dbg-http" class="dl-val text-green">● OK</span></div>
-      <div class="debug-line"><span class="dl-label">WebSocket:</span> <span id="dbg-ws" class="dl-val text-yellow">○ CONNECTING</span></div>
-      <div class="debug-line"><span class="dl-label">Target:</span> <span id="dbg-target" class="dl-val">...</span></div>
+      <!-- 1. CONTROLLER WEBSOCKET CLIENT -->
+      <div class="debug-section-hdr">WEBSOCKET CLIENT</div>
+      <div class="debug-line"><span class="dl-label">Target:</span> <span id="dbg-target" class="dl-val text-cyan">...</span></div>
+      <div class="debug-line"><span class="dl-label">Client State:</span> <span id="dbg-client-state" class="dl-val text-yellow">NOT_STARTED</span></div>
+      <div class="debug-line"><span class="dl-label">Last Event:</span> <span id="dbg-last-event" class="dl-val">NONE</span></div>
       <div class="debug-line"><span class="dl-label">HTTP Host:</span> <span id="dbg-http-host" class="dl-val">...</span></div>
       <div class="debug-line"><span class="dl-label">HTTP Port:</span> <span id="dbg-http-port" class="dl-val">...</span></div>
-      <div class="debug-line"><span class="dl-label">WS Host:</span> <span id="dbg-ws-host" class="dl-val">...</span></div>
-      <div class="debug-line"><span class="dl-label">WS Port:</span> <span id="dbg-ws-port" class="dl-val">...</span></div>
-      <div class="debug-line"><span class="dl-label">Player:</span> <span id="dbg-player" class="dl-val">...</span></div>
-      <div class="debug-line"><span class="dl-label">Session:</span> <span id="dbg-session" class="dl-val">...</span></div>
-      <div class="debug-line"><span class="dl-label">Last Event:</span> <span id="dbg-last-event" class="dl-val">CONNECT_START</span></div>
-      <div class="debug-line"><span class="dl-label">Error:</span> <span id="dbg-error" class="dl-val">none</span></div>
+      <div class="debug-line"><span class="dl-label">WS Port (Parsed):</span> <span id="dbg-ws-port" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Player Slot:</span> <span id="dbg-player" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Session Token:</span> <span id="dbg-session" class="dl-val">...</span></div>
+      <div class="debug-line"><span class="dl-label">Error Detail:</span> <span id="dbg-error" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Code:</span> <span id="dbg-close-code" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Reason:</span> <span id="dbg-close-reason" class="dl-val">none</span></div>
 
+      <!-- 2. RAW WEBSOCKET TEST (:8766) -->
+      <div class="debug-section-hdr raw-hdr">RAW WS TEST (:8766)</div>
+      <div class="debug-line"><span class="dl-label">Target:</span> <span id="dbg-raw-target" class="dl-val text-cyan">...</span></div>
+      <div class="debug-line"><span class="dl-label">State:</span> <span id="dbg-raw-state" class="dl-val">NOT TESTED</span></div>
+      <div class="debug-line"><span class="dl-label">Result:</span> <span id="dbg-raw-result" class="dl-val">NONE</span></div>
+      <div class="debug-btn-bar">
+        <button id="btn-run-raw-ws-test" class="btn-raw-test" type="button">[ TEST RAW WEBSOCKET ]</button>
+        <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank">EXT TEST PAGE</a>
+      </div>
+
+      <!-- 3. LIVE EVENT STREAM -->
       <div class="debug-events-section">
-        <div class="debug-events-header">LIVE EVENT STREAM:</div>
+        <div class="debug-events-header">LIVE CLIENT-SIDE EVENT STREAM:</div>
         <div id="dbg-events-stream" class="debug-events-stream">
           <div class="debug-event-item">Initializing telemetry...</div>
         </div>
