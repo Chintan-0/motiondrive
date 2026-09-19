@@ -123,6 +123,7 @@
   let gyroSupported = false;
   let gyroNeutralGamma = 0.0;
   let currentRawGamma = 0.0;
+  let gyroEmaSteer = 0.0;
   let lastGyroTimestamp = 0;
   let gyroWatchdogTimer = null;
   let isGyroListening = false;
@@ -463,14 +464,6 @@
     window.addEventListener('touchcancel', handleWheelEnd);
   }
 
-  // Gyro state
-  let gyroSupported = false;
-  let gyroNeutralGamma = 0.0;
-  let currentRawGamma = 0.0;
-  let gyroEmaSteer = 0.0;
-  let lastGyroTimestamp = 0;
-  let gyroWatchdogTimer = null;
-  let isGyroListening = false;
 
   // ------------------------------------------------------------- Gyro Controller
   function handleDeviceOrientation(e) {
