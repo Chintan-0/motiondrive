@@ -11,7 +11,7 @@ import webbrowser
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                  QPushButton, QStackedWidget, QLabel, QButtonGroup,
                                  QMessageBox, QDialog, QFrame, QSizeGrip)
 

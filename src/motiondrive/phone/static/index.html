@@ -9,7 +9,52 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#06080d">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=trace">
+  <script>
+    // Early telemetry queue & global error handlers (executed before app.js)
+    window.__MD_EARLY_EVENTS__ = [];
+    function __mdEarlyLog(name, kv) {
+      var t = new Date().toLocaleTimeString();
+      window.__MD_EARLY_EVENTS__.push({ time: t, name: name, kv: kv || {} });
+      try {
+        var qs = new URLSearchParams({ event: name, details: JSON.stringify(kv || {}) });
+        fetch('/client-log?' + qs.toString(), { mode: 'no-cors' }).catch(function(){});
+      } catch(e){}
+    }
+
+    window.onerror = function(msg, url, line, col, err) {
+      var info = { message: String(msg), filename: String(url), line: String(line), column: String(col) };
+      __mdEarlyLog('JS_RUNTIME_ERROR', info);
+      var errEl = document.getElementById('dbg-error');
+      if (errEl) errEl.textContent = msg + ' (' + url + ':' + line + ':' + col + ')';
+      var streamEl = document.getElementById('dbg-events-stream');
+      if (streamEl) {
+        streamEl.innerHTML += '<div class="debug-event-item"><span class="evt-time">[' + new Date().toLocaleTimeString() + ']</span> <span class="evt-err">JS_RUNTIME_ERROR</span> <span class="evt-detail">' + msg + ' (' + line + ':' + col + ')</span></div>';
+      }
+    };
+
+    window.onunhandledrejection = function(e) {
+      var reason = e ? (e.reason ? (e.reason.message || e.reason) : e) : 'unknown';
+      __mdEarlyLog('JS_UNHANDLED_REJECTION', { reason: String(reason) });
+      var errEl = document.getElementById('dbg-error');
+      if (errEl) errEl.textContent = 'Unhandled rejection: ' + reason;
+      var streamEl = document.getElementById('dbg-events-stream');
+      if (streamEl) {
+        streamEl.innerHTML += '<div class="debug-event-item"><span class="evt-time">[' + new Date().toLocaleTimeString() + ']</span> <span class="evt-err">JS_UNHANDLED_REJECTION</span> <span class="evt-detail">' + reason + '</span></div>';
+      }
+    };
+
+    window.toggleMdDebugPanel = function(show) {
+      var p = document.getElementById('connection-debug-panel');
+      if (!p) return;
+      if (typeof show === 'boolean') {
+        if (show) p.classList.remove('hidden');
+        else p.classList.add('hidden');
+      } else {
+        p.classList.toggle('hidden');
+      }
+    };
+  </script>
 </head>
 <body>
   <!-- Portrait Orientation Banner -->
@@ -29,7 +74,7 @@
       </div>
 
       <div class="header-center">
-        <div id="connection-badge" class="badge connecting">
+        <div id="connection-badge" class="badge connecting" onclick="window.toggleMdDebugPanel && window.toggleMdDebugPanel()">
           <span class="dot"></span>
           <span id="status-text">CONNECTING...</span>
         </div>
@@ -41,7 +86,7 @@
 
       <div class="header-right">
         <!-- Connection Debug Toggle Button -->
-        <button id="btn-toggle-debug" class="debug-toggle-btn" type="button" title="Connection Debug">
+        <button id="btn-toggle-debug" class="debug-toggle-btn" type="button" title="Connection Debug" onclick="window.toggleMdDebugPanel && window.toggleMdDebugPanel()">
           🐞 DEBUG
         </button>
 
@@ -203,7 +248,7 @@
     <div class="debug-panel-header">
       <span class="debug-panel-title">CONNECTION CLIENT TRACE</span>
       <div class="debug-panel-actions">
-        <button id="btn-close-debug" class="debug-close-btn" type="button" title="Close Debug Panel">✕</button>
+        <button id="btn-close-debug" class="debug-close-btn" type="button" title="Close Debug Panel" onclick="window.toggleMdDebugPanel && window.toggleMdDebugPanel(false)">✕</button>
       </div>
     </div>
     <div class="debug-panel-body">
@@ -220,6 +265,9 @@
       <div class="debug-line"><span class="dl-label">Error Detail:</span> <span id="dbg-error" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Code:</span> <span id="dbg-close-code" class="dl-val">none</span></div>
       <div class="debug-line"><span class="dl-label">Close Reason:</span> <span id="dbg-close-reason" class="dl-val">none</span></div>
+      <div class="debug-btn-bar" style="margin-top:6px;">
+        <button id="btn-manual-connect" class="btn-manual-connect" type="button">[ CONNECT WEBSOCKET NOW ]</button>
+      </div>
 
       <!-- 2. RAW WEBSOCKET TEST (:8766) -->
       <div class="debug-section-hdr raw-hdr">RAW WS TEST (:8766)</div>
@@ -227,7 +275,7 @@
       <div class="debug-line"><span class="dl-label">State:</span> <span id="dbg-raw-state" class="dl-val">NOT TESTED</span></div>
       <div class="debug-line"><span class="dl-label">Result:</span> <span id="dbg-raw-result" class="dl-val">NONE</span></div>
       <div class="debug-btn-bar">
-        <button id="btn-run-raw-ws-test" class="btn-raw-test" type="button">[ TEST RAW WEBSOCKET ]</button>
+        <button id="btn-run-raw-ws-test" class="btn-raw-test" type="button">[ RAW WS TEST ]</button>
         <a id="dbg-raw-test-link" href="/ws-test" class="debug-test-link" target="_blank">EXT TEST PAGE</a>
       </div>
 
@@ -241,6 +289,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=trace"></script>
 </body>
 </html>

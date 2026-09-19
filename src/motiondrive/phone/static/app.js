@@ -1,10 +1,92 @@
 (function () {
   'use strict';
 
-  // Extract session token & player slot from URL search query (?session=...&player=1)
-  const params = new URLSearchParams(window.location.search);
-  const sessionToken = params.get('session') || '';
-  const playerParam = parseInt(params.get('player') || '1', 10);
+  // 1. Telemetry Event Stream & Remote Sync (Initialized FIRST)
+  const recentEvents = (typeof window !== 'undefined' && window.__MD_EARLY_EVENTS__) ? window.__MD_EARLY_EVENTS__ : [];
+  let dbgLastEvent = null;
+  let dbgEventsStream = null;
+  let dbgError = null;
+
+  function logDebugEvent(evtName, kv = {}) {
+    const kvStr = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join(' ');
+    console.log(`[MotionDrive] ${evtName} ${kvStr}`.trim());
+    if (!dbgLastEvent) dbgLastEvent = document.getElementById('dbg-last-event');
+    if (!dbgEventsStream) dbgEventsStream = document.getElementById('dbg-events-stream');
+    if (!dbgError) dbgError = document.getElementById('dbg-error');
+
+    if (dbgLastEvent) dbgLastEvent.textContent = evtName;
+
+    const timeStr = new Date().toLocaleTimeString();
+    recentEvents.push({ time: timeStr, name: evtName, kv });
+    if (recentEvents.length > 20) recentEvents.shift();
+
+    if (dbgEventsStream) {
+      dbgEventsStream.innerHTML = recentEvents.map(e => {
+        let cssClass = 'evt-name';
+        if (e.name.includes('FAIL') || e.name.includes('ERR') || e.name.includes('REJECT') || e.name.includes('TIMEOUT') || e.name.includes('CLOSE')) {
+          cssClass = (e.name.includes('CLOSE') && e.kv && e.kv.clean) ? 'evt-name' : 'evt-err';
+        } else if (e.name.includes('SUCC') || e.name.includes('ACK_REC') || e.name === 'WS_OPEN' || e.name === 'RAW_WS_OPEN') {
+          cssClass = 'evt-succ';
+        }
+        const detailsStr = Object.entries(e.kv).map(([k, v]) => `${k}=${v}`).join(' ');
+        return `<div class="debug-event-item"><span class="evt-time">[${e.time}]</span> <span class="${cssClass}">${e.name}</span> <span class="evt-detail">${detailsStr}</span></div>`;
+      }).join('');
+      dbgEventsStream.scrollTop = dbgEventsStream.scrollHeight;
+    }
+
+    try {
+      const qs = new URLSearchParams({
+        event: evtName,
+        player: String((typeof playerParam !== 'undefined') ? playerParam : 1),
+        details: kvStr
+      });
+      fetch(`/client-log?${qs.toString()}`, { mode: 'no-cors' }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // Explicit startup events
+  logDebugEvent('MOBILE_JS_SCRIPT_LOADED', { time: Date.now() });
+  logDebugEvent('MOBILE_APP_INIT_START', { url: (window.location.href || '').slice(0, 100) });
+
+  // 2. Query Parameter Parsing
+  logDebugEvent('QUERY_PARSE_START', {});
+  let params, sessionToken, playerParam, wsPortRaw, wsPortParam;
+  try {
+    params = new URLSearchParams(window.location.search);
+    sessionToken = params.get('session') || '';
+    playerParam = parseInt(params.get('player') || '1', 10);
+    wsPortRaw = params.get('ws_port');
+    wsPortParam = parseInt(wsPortRaw, 10);
+    logDebugEvent('QUERY_PARSE_SUCCESS', {
+      player: playerParam,
+      ws_port: (wsPortParam > 0) ? wsPortParam : 8766,
+      session_present: Boolean(sessionToken)
+    });
+  } catch (parseErr) {
+    logDebugEvent('QUERY_PARSE_ERROR', { reason: parseErr.message || String(parseErr) });
+    params = new URLSearchParams();
+    sessionToken = '';
+    playerParam = 1;
+    wsPortRaw = '8766';
+    wsPortParam = 8766;
+  }
+
+  // 3. WebSocket Configuration
+  logDebugEvent('WS_CONFIG_START', {});
+  const httpHost = window.location.hostname || '127.0.0.1';
+  const httpPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
+  const wsHost = httpHost;
+  const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+
+  logDebugEvent('WS_CONFIG_READY', {
+    host: wsHost,
+    port: wsPort,
+    scheme: wsProtocol === 'wss:' ? 'wss' : 'ws',
+    player: playerParam,
+    session_present: Boolean(sessionToken)
+  });
 
   // App State
   let activeMode = 'manual'; // 'manual' | 'gyro'
@@ -87,33 +169,24 @@
   const debugPanel = document.getElementById('connection-debug-panel');
   const btnToggleDebug = document.getElementById('btn-toggle-debug');
   const btnCloseDebug = document.getElementById('btn-close-debug');
+  const btnManualConnect = document.getElementById('btn-manual-connect');
   const btnRunRawWsTest = document.getElementById('btn-run-raw-ws-test');
-  const dbgEventsStream = document.getElementById('dbg-events-stream');
+  dbgEventsStream = document.getElementById('dbg-events-stream');
   const dbgTarget = document.getElementById('dbg-target');
   const dbgClientState = document.getElementById('dbg-client-state');
-  const dbgLastEvent = document.getElementById('dbg-last-event');
+  dbgLastEvent = document.getElementById('dbg-last-event');
   const dbgHttpHost = document.getElementById('dbg-http-host');
   const dbgHttpPort = document.getElementById('dbg-http-port');
   const dbgWsPort = document.getElementById('dbg-ws-port');
   const dbgPlayer = document.getElementById('dbg-player');
   const dbgSession = document.getElementById('dbg-session');
-  const dbgError = document.getElementById('dbg-error');
+  dbgError = document.getElementById('dbg-error');
   const dbgCloseCode = document.getElementById('dbg-close-code');
   const dbgCloseReason = document.getElementById('dbg-close-reason');
   const dbgRawTarget = document.getElementById('dbg-raw-target');
   const dbgRawState = document.getElementById('dbg-raw-state');
   const dbgRawResult = document.getElementById('dbg-raw-result');
   const dbgRawTestLink = document.getElementById('dbg-raw-test-link');
-
-  // Network & WebSocket Target Configuration
-  const httpHost = window.location.hostname || '127.0.0.1';
-  const httpPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsPortRaw = params.get('ws_port');
-  const wsPortParam = parseInt(wsPortRaw, 10);
-  const wsPort = (wsPortParam > 0) ? wsPortParam : 8766;
-  const wsHost = httpHost;
-  const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
 
   // Client WebSocket State Tracker: NOT_STARTED | CONNECTING | OPEN | AUTHENTICATING | CONNECTED | REJECTED | ERROR | CLOSED
   let clientWsState = 'NOT_STARTED';
@@ -146,6 +219,8 @@
   if (dbgRawTarget) dbgRawTarget.textContent = wsUrl;
   if (dbgRawTestLink) dbgRawTestLink.href = `/ws-test${window.location.search}`;
   setClientWsState('NOT_STARTED');
+
+  logDebugEvent('MOBILE_APP_INIT_COMPLETE', {});
 
   function toggleDebugPanel(show) {
     if (!debugPanel) return;
@@ -596,65 +671,6 @@
   }
 
   let handshakeAckTimer = null;
-  const recentEvents = [];
-
-  function logDebugEvent(evtName, kv = {}) {
-    const kvStr = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join(' ');
-    console.log(`[MotionDrive] ${evtName} ${kvStr}`.trim());
-    if (dbgLastEvent) dbgLastEvent.textContent = evtName;
-
-    // Maintain recent event queue
-    const timeStr = new Date().toLocaleTimeString();
-    recentEvents.push({ time: timeStr, name: evtName, kv });
-    if (recentEvents.length > 20) recentEvents.shift();
-
-    if (dbgEventsStream) {
-      dbgEventsStream.innerHTML = recentEvents.map(e => {
-        let cssClass = 'evt-name';
-        if (e.name.includes('FAIL') || e.name.includes('ERROR') || e.name.includes('REJECT') || e.name.includes('TIMEOUT')) {
-          cssClass = 'evt-err';
-        } else if (e.name.includes('SUCCESS') || e.name.includes('ACK_REC') || e.name === 'WS_OPEN') {
-          cssClass = 'evt-succ';
-        }
-        const detailsStr = Object.entries(e.kv).map(([k, v]) => `${k}=${v}`).join(' ');
-        return `<div class="debug-event-item"><span class="evt-time">[${e.time}]</span> <span class="${cssClass}">${e.name}</span> <span class="evt-detail">${detailsStr}</span></div>`;
-      }).join('');
-      dbgEventsStream.scrollTop = dbgEventsStream.scrollHeight;
-    }
-
-    // Transmit to desktop server via working HTTP :8765 (/client-log)
-    try {
-      const qs = new URLSearchParams({
-        event: evtName,
-        player: String(playerParam),
-        details: kvStr
-      });
-      fetch(`/client-log?${qs.toString()}`, { mode: 'no-cors' }).catch(() => {});
-    } catch (_) {}
-  }
-
-  // Lifecycle Initialization Telemetry
-  logDebugEvent('MOBILE_APP_INIT', {
-    url: (window.location.href || '').slice(0, 120),
-    user_agent: (navigator.userAgent || '').slice(0, 60)
-  });
-
-  logDebugEvent('QUERY_PARSED', {
-    player: playerParam,
-    session_present: Boolean(sessionToken),
-    session_prefix: sessionToken ? sessionToken.slice(0, 7) : 'none',
-    raw_ws_port: wsPortRaw || 'none',
-    parsed_ws_port: wsPort
-  });
-
-  logDebugEvent('WS_CONFIG_READY', {
-    http_host: httpHost,
-    http_port: httpPort,
-    ws_host: wsHost,
-    ws_port: wsPort,
-    scheme: wsProtocol,
-    computed_url: wsUrl
-  });
 
   // Inline Raw WebSocket Test on :8766
   let rawTestWs = null;
@@ -670,7 +686,7 @@
       dbgRawResult.className = 'dl-val';
     }
 
-    logDebugEvent('RAW_WS_TEST_START', { url: wsUrl });
+    logDebugEvent('RAW_WS_START', { url: wsUrl });
 
     if (rawTestWs) {
       try { rawTestWs.close(); } catch(_) {}
@@ -690,20 +706,20 @@
             dbgRawState.className = 'dl-val text-red';
           }
           if (dbgRawResult) {
-            dbgRawResult.textContent = 'Timeout (5s) - port 8766 unreachable/blocked';
+            dbgRawResult.textContent = 'Timeout (5s) - port 8766 unreachable';
             dbgRawResult.className = 'dl-val text-red';
           }
-          logDebugEvent('RAW_WS_TEST_FAIL', { reason: 'timeout' });
+          logDebugEvent('RAW_WS_ERROR', { error: 'timeout_5s' });
           try { rawTestWs.close(); } catch(_) {}
         }
       }, 5000);
 
       rawTestWs.onopen = () => {
+        logDebugEvent('RAW_WS_OPEN', { url: wsUrl });
         if (dbgRawState) {
-          dbgRawState.textContent = 'OPEN (SENDING PING)';
+          dbgRawState.textContent = 'OPEN (SENDING TEST PING)';
           dbgRawState.className = 'dl-val text-yellow';
         }
-        logDebugEvent('RAW_WS_TEST_OPEN', { url: wsUrl });
         rawTestWs.send(JSON.stringify({ version: 1, type: 'ws_test' }));
       };
 
@@ -722,7 +738,7 @@
               dbgRawResult.textContent = `REACHABLE ✓ (RTT: ${rtt}ms)`;
               dbgRawResult.className = 'dl-val text-green';
             }
-            logDebugEvent('RAW_WS_TEST_SUCCESS', { rtt_ms: rtt });
+            logDebugEvent('RAW_WS_SUCCESS', { rtt_ms: rtt });
             try { rawTestWs.close(); } catch(_) {}
           }
         } catch(_) {}
@@ -741,7 +757,7 @@
             dbgRawResult.textContent = `FAILED: ${errMsg}`;
             dbgRawResult.className = 'dl-val text-red';
           }
-          logDebugEvent('RAW_WS_TEST_FAIL', { error: errMsg });
+          logDebugEvent('RAW_WS_ERROR', { error: errMsg });
         }
       };
 
@@ -758,7 +774,7 @@
             dbgRawResult.textContent = reason;
             dbgRawResult.className = 'dl-val text-red';
           }
-          logDebugEvent('RAW_WS_TEST_CLOSED', { code: closeEvt.code, reason });
+          logDebugEvent('RAW_WS_CLOSE', { code: closeEvt.code, reason, clean: closeEvt.wasClean });
         }
       };
     } catch (err) {
@@ -771,7 +787,7 @@
         dbgRawResult.textContent = err.message || String(err);
         dbgRawResult.className = 'dl-val text-red';
       }
-      logDebugEvent('RAW_WS_TEST_EXCEPTION', { error: err.message || err });
+      logDebugEvent('RAW_WS_ERROR', { error: err.message || err });
     }
   }
 
@@ -780,10 +796,33 @@
     btnRunRawWsTest.addEventListener('touchend', runInlineRawWsTest);
   }
 
+  // Manual Connect Button Handler
+  if (btnManualConnect) {
+    const onManualConnect = (e) => {
+      if (e) e.preventDefault();
+      isStoppedByUser = false;
+      logDebugEvent('MANUAL_CONNECT_CLICKED', { host: wsHost, port: wsPort, player: playerParam });
+      if (ws) {
+        try { ws.close(); } catch(_) {}
+        ws = null;
+      }
+      connect();
+    };
+    btnManualConnect.addEventListener('click', onManualConnect);
+    btnManualConnect.addEventListener('touchend', onManualConnect);
+  }
+
   function connect() {
-    if (isStoppedByUser) return;
+    logDebugEvent('CONNECT_FUNCTION_ENTERED', { is_stopped: isStoppedByUser });
+    if (isStoppedByUser) {
+      logDebugEvent('CONNECT_FUNCTION_EXITED', { reason: 'stopped_by_user' });
+      return;
+    }
     setStatus('connecting', 'CONNECTING...');
     setClientWsState('CONNECTING');
+
+    logDebugEvent('CONNECT_WEBSOCKET_CALLED', { url: wsUrl });
+    logDebugEvent('WS_CONNECT_START', { url: wsUrl });
 
     // Populate Debug Panel values
     if (dbgTarget) dbgTarget.textContent = wsUrl;
@@ -795,20 +834,14 @@
     if (dbgRawTarget) dbgRawTarget.textContent = wsUrl;
     if (dbgRawTestLink) dbgRawTestLink.href = `/ws-test${window.location.search}`;
 
-    logDebugEvent('WS_CONNECT_START', {
-      host: wsHost,
-      port: wsPort,
-      scheme: wsProtocol,
-      player: playerParam,
-      session_present: Boolean(sessionToken),
-      computed_url: wsUrl
-    });
-
+    logDebugEvent('WS_CONNECT_CONSTRUCTOR_START', { url: wsUrl });
     try {
       ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
+      logDebugEvent('WS_CONNECT_CONSTRUCTOR_RETURNED', { url: wsUrl, readyState: ws.readyState });
 
       ws.onopen = () => {
+        logDebugEvent('WS_OPEN', { url: wsUrl });
         // Socket is open, pending server session authentication
         wheelTouchId = null;
         brakeTouchId = null;
@@ -825,7 +858,6 @@
           playerBadgeEl.className = `player-tag p${playerParam === 2 ? 2 : 1}`;
         }
 
-        logDebugEvent('WS_OPEN', { url: wsUrl });
         setClientWsState('AUTHENTICATING');
         if (dbgError) dbgError.textContent = 'none';
 
@@ -865,6 +897,9 @@
           }
 
           const data = JSON.parse(e.data);
+          const msgType = data.type || 'unknown';
+          logDebugEvent('WS_MESSAGE', { type: msgType });
+
           if (data.type === 'handshake_ack' && data.authenticated) {
             if (handshakeAckTimer) { clearTimeout(handshakeAckTimer); handshakeAckTimer = null; }
             isConnected = true;
@@ -904,7 +939,7 @@
         logDebugEvent('WS_CLOSE', {
           code: e.code,
           reason: reasonStr,
-          was_clean: e.wasClean
+          clean: e.wasClean
         });
         isConnected = false;
         if (dbgCloseCode) dbgCloseCode.textContent = String(e.code || 'none');
@@ -932,7 +967,7 @@
     } catch (err) {
       const errMsg = err.message || String(err);
       setClientWsState('ERROR');
-      logDebugEvent('WS_EXCEPTION', { error: errMsg });
+      logDebugEvent('WS_CONNECT_CONSTRUCTOR_ERROR', { error: errMsg });
       if (dbgError) dbgError.textContent = errMsg;
       setStatus('error', 'CONNECTION FAILED');
       toggleDebugPanel(true);
@@ -940,6 +975,7 @@
         setTimeout(connect, 3000);
       }
     }
+    logDebugEvent('CONNECT_FUNCTION_EXITED', {});
   }
 
   function sendBinaryPayload(recenterFlag = false, emergencyStopFlag = false) {

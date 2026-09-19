@@ -874,6 +874,24 @@ body, html {
   margin-top: 6px;
   margin-bottom: 6px;
 }
+.btn-manual-connect {
+  background: #16a34a;
+  color: #ffffff;
+  border: none;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 8px 12px;
+  min-height: 38px;
+  border-radius: 6px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  letter-spacing: 0.5px;
+  width: 100%;
+}
+.btn-manual-connect:active {
+  background: #15803d;
+}
 .btn-raw-test {
   flex: 1;
   background: #0284c7;
